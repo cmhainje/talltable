@@ -8,16 +8,26 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy_healpix import HEALPix
-from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
+from .pixid import rowcoldet_to_pixid, pixid_to_rowcoldet
 
 
 _idx = np.arange(2040, dtype=np.uint32)
-ALL_INDICES = np.stack(np.meshgrid(_idx, _idx)[::-1], -1).reshape(-1, 2)
+ALL_ROW, ALL_COL = map(np.ravel, np.meshgrid(_idx, _idx, indexing='ij'))
+
 HEALPIX02 = HEALPix(nside=2**2, order="nested", frame="icrs")
-HEALPIX16 = HEALPix(nside=2**16, order="nested", frame="icrs")
+HEALPIX20 = HEALPix(nside=2**20, order="nested", frame="icrs")
+
+
+def now_simpleformat() -> str:
+    time = datetime.now().isoformat(timespec='seconds')
+    time = time.replace('-', '')
+    time = time.replace(':', '')
+    time = time.replace('T', '-')
+    return time
 
 
 class BatchWriter:
@@ -40,12 +50,13 @@ class BatchWriter:
         }
 
         self.pixels = {
-            "row": [],
-            "col": [],
-            "ra": [],
-            "dec": [],
-            "wavelen": [],
-            "waveband": [],
+            # "row": [],
+            # "col": [],
+            "pixid": [],
+            # "ra": [],
+            # "dec": [],
+            # "wavelen": [],
+            # "waveband": [],
             "ux": [],
             "uy": [],
             "uz": [],
@@ -55,7 +66,7 @@ class BatchWriter:
             # "flags": [],
             # "known": [],
             "hp02": [],
-            "hp16": [],
+            "hp20": [],
             "imageid": [],
         }
 
@@ -74,31 +85,33 @@ class BatchWriter:
         try:
             with fits.open(filepath) as hdul:
                 if self.skip_bad:
-                    flags = hdul["FLAGS"].data[*ALL_INDICES.T]
+                    flags = hdul["FLAGS"].data[ALL_ROW, ALL_COL]
                     good = flags & ~(1 << 21) == 0
                     if np.count_nonzero(good) == 0:
                         return None
-                    idx = ALL_INDICES[good]
+                    idx = (ALL_ROW[good], ALL_COL[good])
                 else:
-                    idx = ALL_INDICES
+                    idx = (ALL_ROW, ALL_COL)
 
-                record("row", idx[:, 0])
-                record("col", idx[:, 1])
+                # record("row", idx[0].astype(np.int32))
+                # record("col", idx[1].astype(np.int32))
+                det = hdul["IMAGE"].header["DETECTOR"]
+                record("pixid",    rowcoldet_to_pixid(*idx, det))
 
-                record("flux", byteswap(hdul["IMAGE"].data[*idx.T]))
-                record("variance", byteswap(hdul["VARIANCE"].data[*idx.T]))
-                record("zodi", byteswap(hdul["ZODI"].data[*idx.T]))
+                record("flux",     byteswap(hdul["IMAGE"].data[*idx]).astype(np.float32))
+                record("variance", byteswap(hdul["VARIANCE"].data[*idx]).astype(np.float32))
+                record("zodi",     byteswap(hdul["ZODI"].data[*idx]).astype(np.float32))
 
                 if self.skip_bad:
-                    record("known", hdul["FLAGS"].data[*idx.T] & (1 << 21) == 1)
+                    record("known", hdul["FLAGS"].data[*idx] & (1 << 21) == 1)
                 else:
-                    record("flags", byteswap(hdul["FLAGS"].data[*idx.T]))
+                    record("flags", byteswap(hdul["FLAGS"].data[*idx]).astype(np.int32))
 
                 # sky position and derived quantities
                 wcs = WCS(header=hdul["IMAGE"].header)
-                ra, dec = wcs.wcs_pix2world(idx, 0).T
-                record("ra", ra)
-                record("dec", dec)
+                ra, dec = wcs.wcs_pix2world(*idx, 0)
+                # record("ra", ra)
+                # record("dec", dec)
 
                 record("ux", np.cos(np.radians(dec)) * np.cos(np.radians(ra)))
                 record("uy", np.cos(np.radians(dec)) * np.sin(np.radians(ra)))
@@ -106,25 +119,25 @@ class BatchWriter:
 
                 sc = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
                 record("hp02", HEALPIX02.skycoord_to_healpix(sc))
-                record("hp16", HEALPIX16.skycoord_to_healpix(sc))
+                record("hp20", HEALPIX20.skycoord_to_healpix(sc))
 
                 # wavelength
-                del hdul["IMAGE"].header["A_ORDER"]
-                del hdul["IMAGE"].header["B_ORDER"]
-                del hdul["IMAGE"].header["AP_ORDER"]
-                del hdul["IMAGE"].header["BP_ORDER"]
-                wave_wcs = WCS(header=hdul["IMAGE"].header, fobj=hdul, key="W")
-                wave_wcs.sip = None
-                lam, dlam = wave_wcs.wcs_pix2world(idx, 0).T
-                record("wavelen", lam)
-                record("waveband", dlam)
+                # del hdul["IMAGE"].header["A_ORDER"]
+                # del hdul["IMAGE"].header["B_ORDER"]
+                # del hdul["IMAGE"].header["AP_ORDER"]
+                # del hdul["IMAGE"].header["BP_ORDER"]
+                # wave_wcs = WCS(header=hdul["IMAGE"].header, fobj=hdul, key="W")
+                # wave_wcs.sip = None
+                # lam, dlam = wave_wcs.wcs_pix2world(idx, 0).T
+                # record("wavelen", lam)
+                # record("waveband", dlam)
 
                 # image-level stuff
                 t_beg = hdul["IMAGE"].header["MJD-BEG"]
                 t_end = hdul["IMAGE"].header["MJD-END"]
                 obsid = hdul["IMAGE"].header["OBSID"]
                 imageid = hdul["IMAGE"].header["EXPIDN"]
-                record("imageid", np.array([imageid for _ in range(len(idx))]))
+                record("imageid", np.array([imageid for _ in range(len(idx[0]))]))
 
                 self.images["imageid"].append(imageid)
                 self.images["filepath"].append(filepath)
@@ -154,6 +167,7 @@ class BatchWriter:
 
     def _write_pixels(self):
         self.flatten_pixels()
+        time = now_simpleformat()
         ds.write_dataset(
             data=pa.table(self.pixels),
             base_dir=PIXEL_DB_PATH,
@@ -161,7 +175,7 @@ class BatchWriter:
             partitioning_flavor="hive",
             format="parquet",
             file_options=self.file_opt,
-            basename_template="release_{i}.parquet",
+            basename_template=f"release_{time}_{{i}}.parquet",
             existing_data_behavior="overwrite_or_ignore",
         )
 
