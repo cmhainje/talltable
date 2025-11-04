@@ -12,7 +12,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
-from .pixid import rowcoldet_to_pixid, pixid_to_rowcoldet
+from .pixid import rowcoldet_to_pixid
+from .util import defer_interrupt
 
 
 _idx = np.arange(2040, dtype=np.uint32)
@@ -49,38 +50,43 @@ class BatchWriter:
             "t_end": [],
         }
 
-        self.pixels = {
-            # "row": [],
-            # "col": [],
-            "pixid": [],
-            # "ra": [],
-            # "dec": [],
-            # "wavelen": [],
-            # "waveband": [],
-            "ux": [],
-            "uy": [],
-            "uz": [],
-            "flux": [],
-            "variance": [],
-            "zodi": [],
-            # "flags": [],
-            # "known": [],
-            "hp02": [],
-            "hp20": [],
-            "imageid": [],
-        }
+        self.pixel_tables = []
 
-        if self.skip_bad:
-            self.pixels["known"] = []
-        else:
-            self.pixels["flags"] = []
+        # self.pixels = {
+        #     # "row": [],
+        #     # "col": [],
+        #     "pixid": [],
+        #     # "ra": [],
+        #     # "dec": [],
+        #     # "wavelen": [],
+        #     # "waveband": [],
+        #     "ux": [],
+        #     "uy": [],
+        #     "uz": [],
+        #     "flux": [],
+        #     "variance": [],
+        #     "zodi": [],
+        #     # "flags": [],
+        #     # "known": [],
+        #     "hp02": [],
+        #     "hp20": [],
+        #     "imageid": [],
+        # }
+
+        # if self.skip_bad:
+        #     self.pixels["known"] = []
+        # else:
+        #     self.pixels["flags"] = []
 
     def process_image(self, filepath):
         def byteswap(X):
             return X.view(X.dtype.newbyteorder()).byteswap()
 
+        pixels = dict()
+
         def record(k, v):
-            self.pixels[k].append(v)
+            pixels[k] = v
+            # self.pixels[k].append(v)
 
         try:
             with fits.open(filepath) as hdul:
@@ -139,6 +145,8 @@ class BatchWriter:
                 imageid = hdul["IMAGE"].header["EXPIDN"]
                 record("imageid", np.array([imageid for _ in range(len(idx[0]))]))
 
+                self.pixel_tables.append(pa.table(pixels))
+
                 self.images["imageid"].append(imageid)
                 self.images["filepath"].append(filepath)
                 self.images["obsid"].append(obsid)
@@ -153,23 +161,25 @@ class BatchWriter:
                 self.write()
 
     def count(self):
-        return len(self.images["imageid"])
+        # return len(self.images["imageid"])
+        return len(self.pixel_tables)
 
     def clear(self):
         for key in self.images.keys():
             self.images[key] = []
-        for key in self.pixels.keys():
-            self.pixels[key] = []
+        self.pixel_tables = []
+        # for key in self.pixels.keys():
+        #     self.pixels[key] = []
 
-    def flatten_pixels(self):
-        for key, value in self.pixels.items():
-            self.pixels[key] = np.concatenate(value)
+    # def flatten_pixels(self):
+    #     for key, value in self.pixels.items():
+    #         self.pixels[key] = np.concatenate(value)
 
     def _write_pixels(self):
-        self.flatten_pixels()
+        # self.flatten_pixels()
         time = now_simpleformat()
         ds.write_dataset(
-            data=pa.table(self.pixels),
+            data=pa.concat_tables(self.pixel_tables),
             base_dir=PIXEL_DB_PATH,
             partitioning=["hp02"],
             partitioning_flavor="hive",
@@ -193,6 +203,7 @@ class BatchWriter:
         tmp_file.replace(IMAGE_DB_PATH)  # overwrite existing file
 
     def write(self):
-        self._write_pixels()
-        self._write_images()
-        self.clear()
+        with defer_interrupt():
+            self._write_pixels()
+            self._write_images()
+            self.clear()
