@@ -1,4 +1,5 @@
 import numpy as np
+import h5py
 
 import pyarrow as pa
 import pyarrow.dataset as ds
@@ -13,14 +14,18 @@ from pathlib import Path
 
 from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
 from .pixid import rowcoldet_to_pixid
-from .util import defer_interrupt
+from .util import defer_interrupt, now_simpleformat
 
 
 _idx = np.arange(2040, dtype=np.uint32)
 ALL_ROW, ALL_COL = map(np.ravel, np.meshgrid(_idx, _idx, indexing='ij'))
+ALL_PIXID = rowcoldet_to_pixid(ALL_ROW, ALL_COL, 0)
 
-HEALPIX02 = HEALPix(nside=2**2, order="nested", frame="icrs")
-HEALPIX20 = HEALPix(nside=2**20, order="nested", frame="icrs")
+HP_LO_LEVEL = 2
+HP_HI_LEVEL = 24
+
+HEALPIX_LO = HEALPix(nside=2**HP_LO_LEVEL, order="nested", frame="icrs")
+HEALPIX_HI = HEALPix(nside=2**HP_HI_LEVEL, order="nested", frame="icrs")
 
 
 SKIP_BAD = True
@@ -44,13 +49,13 @@ def process_image(filepath):
                 if np.count_nonzero(good) == 0:
                     return None
                 idx = (ALL_ROW[good], ALL_COL[good])
+                _pixid = ALL_PIXID[good]
             else:
                 idx = (ALL_ROW, ALL_COL)
+                _pixid = ALL_PIXID[good]
 
-            # record("row", idx[0].astype(np.int32))
-            # record("col", idx[1].astype(np.int32))
             det = hdul["IMAGE"].header["DETECTOR"]
-            record("pixid",    rowcoldet_to_pixid(*idx, det))
+            record("pixid",    _pixid + (det << 24))
 
             record("flux",     byteswap(hdul["IMAGE"].data[*idx]).astype(np.float32))
             record("variance", byteswap(hdul["VARIANCE"].data[*idx]).astype(np.float32))
@@ -64,27 +69,9 @@ def process_image(filepath):
             # sky position and derived quantities
             wcs = WCS(header=hdul["IMAGE"].header)
             ra, dec = wcs.wcs_pix2world(*idx, 0)
-            # record("ra", ra)
-            # record("dec", dec)
-
-            record("ux", np.cos(np.radians(dec)) * np.cos(np.radians(ra)))
-            record("uy", np.cos(np.radians(dec)) * np.sin(np.radians(ra)))
-            record("uz", np.sin(np.radians(dec)))
-
             sc = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
-            record("hp02", HEALPIX02.skycoord_to_healpix(sc))
-            record("hp20", HEALPIX20.skycoord_to_healpix(sc))
-
-            # wavelength
-            # del hdul["IMAGE"].header["A_ORDER"]
-            # del hdul["IMAGE"].header["B_ORDER"]
-            # del hdul["IMAGE"].header["AP_ORDER"]
-            # del hdul["IMAGE"].header["BP_ORDER"]
-            # wave_wcs = WCS(header=hdul["IMAGE"].header, fobj=hdul, key="W")
-            # wave_wcs.sip = None
-            # lam, dlam = wave_wcs.wcs_pix2world(idx, 0).T
-            # record("wavelen", lam)
-            # record("waveband", dlam)
+            record("hphigh", HEALPIX_HI.skycoord_to_healpix(sc))
+            record("hppart", pixels["hphigh"] >> (2 * (HP_HI_LEVEL - HP_LO_LEVEL)))
 
             # image-level stuff
             t_beg = hdul["IMAGE"].header["MJD-BEG"]
@@ -92,8 +79,6 @@ def process_image(filepath):
             obsid = hdul["IMAGE"].header["OBSID"]
             imageid = hdul["IMAGE"].header["EXPIDN"]
             record("imageid", np.array([imageid for _ in range(len(idx[0]))]))
-
-            pixels = pa.table(pixels)
 
             images["imageid"] = imageid
             images["filepath"] = filepath
@@ -112,6 +97,8 @@ class ParallelBatchWriter:
     def __init__(self, num_workers=8):
         self.num_workers = num_workers
 
+        self.time = now_simpleformat()
+
         self.file_opt = ds.ParquetFileFormat().make_write_options(
             compression="zstd",
             compression_level=3,
@@ -119,24 +106,35 @@ class ParallelBatchWriter:
 
     def process_batch(self, filepaths):
         with ProcessPoolExecutor(max_workers=self.num_workers) as ex:
-            images, pixels = list(zip(*list( r for r in ex.map(process_image, filepaths) if r is not None )))
+            images, pixels = list(zip(*[r for r in ex.map(process_image, filepaths) if r is not None]))
         images = pa.table({k: [row[k] for row in images] for k in images[0]})
+        pixels = {k: np.concatenate([d[k] for d in pixels]) for k in pixels[0]}
+        pixel_parts = { p: { k: v[ pixels["hppart"] == p ] for k, v in pixels.items() if k != "hppart" } for p in np.unique(pixels["hppart"]) }
 
         with defer_interrupt():
             self.write_images(images)
-            self.write_pixels(pa.concat_tables(pixels))
+            self.write_pixels(pixel_parts)
 
-    def write_pixels(self, pixels):
-        ds.write_dataset(
-            data=pa.table(pixels),
-            base_dir=PIXEL_DB_PATH,
-            partitioning=["hp02"],
-            partitioning_flavor="hive",
-            format="parquet",
-            file_options=self.file_opt,
-            basename_template="release_{i}.parquet",
-            existing_data_behavior="overwrite_or_ignore",
-        )
+    def write_pixels(self, pixel_parts):
+        # time = now_simpleformat()
+
+        def _append(f, k, arr):
+            if k in f:
+                f[k].resize(len(f[k]) + len(arr), axis=0)
+                f[k][-len(arr):] = arr
+            else:
+                f.create_dataset(k, data=arr, maxshape=(None,))
+
+        for p, data in pixel_parts.items():
+            part_dir = PIXEL_DB_PATH / f"hppart={p}"
+            part_dir.mkdir(exist_ok=True)
+
+            path = part_dir / f"chunk_{self.time}.hdf5"
+            with h5py.File(path, 'a') as f:
+                for k, arr in data.items():
+                    if k != 'hppart':
+                        _append(f, k, arr)
+
 
     def write_images(self, images):
         db_path = IMAGE_DB_PATH

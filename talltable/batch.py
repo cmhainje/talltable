@@ -1,34 +1,29 @@
 import numpy as np
+import h5py
 
 import pyarrow as pa
-import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy_healpix import HEALPix
-from datetime import datetime
 from pathlib import Path
 
 from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
 from .pixid import rowcoldet_to_pixid
-from .util import defer_interrupt
+from .util import defer_interrupt, now_simpleformat
 
 
 _idx = np.arange(2040, dtype=np.uint32)
 ALL_ROW, ALL_COL = map(np.ravel, np.meshgrid(_idx, _idx, indexing='ij'))
+ALL_PIXID = rowcoldet_to_pixid(ALL_ROW, ALL_COL, 0)
 
-HEALPIX02 = HEALPix(nside=2**2, order="nested", frame="icrs")
-HEALPIX20 = HEALPix(nside=2**20, order="nested", frame="icrs")
+HP_LO_LEVEL = 2
+HP_HI_LEVEL = 24
 
-
-def now_simpleformat() -> str:
-    time = datetime.now().isoformat(timespec='seconds')
-    time = time.replace('-', '')
-    time = time.replace(':', '')
-    time = time.replace('T', '-')
-    return time
+HEALPIX_LO = HEALPix(nside=2**HP_LO_LEVEL, order="nested", frame="icrs")
+HEALPIX_HI = HEALPix(nside=2**HP_HI_LEVEL, order="nested", frame="icrs")
 
 
 class BatchWriter:
@@ -36,11 +31,6 @@ class BatchWriter:
         self.chunk_size = chunk_size
         self.skip_bad = skip_bad
         self.auto_write = auto_write
-
-        self.file_opt = ds.ParquetFileFormat().make_write_options(
-            compression="zstd",
-            compression_level=3,
-        )
 
         self.images = {
             "imageid": [],
@@ -50,33 +40,8 @@ class BatchWriter:
             "t_end": [],
         }
 
-        self.pixel_tables = []
+        self.pixel_parts = {}
 
-        # self.pixels = {
-        #     # "row": [],
-        #     # "col": [],
-        #     "pixid": [],
-        #     # "ra": [],
-        #     # "dec": [],
-        #     # "wavelen": [],
-        #     # "waveband": [],
-        #     "ux": [],
-        #     "uy": [],
-        #     "uz": [],
-        #     "flux": [],
-        #     "variance": [],
-        #     "zodi": [],
-        #     # "flags": [],
-        #     # "known": [],
-        #     "hp02": [],
-        #     "hp20": [],
-        #     "imageid": [],
-        # }
-
-        # if self.skip_bad:
-        #     self.pixels["known"] = []
-        # else:
-        #     self.pixels["flags"] = []
 
     def process_image(self, filepath):
         def byteswap(X):
@@ -86,7 +51,6 @@ class BatchWriter:
 
         def record(k, v):
             pixels[k] = v
-            # self.pixels[k].append(v)
 
         try:
             with fits.open(filepath) as hdul:
@@ -96,13 +60,13 @@ class BatchWriter:
                     if np.count_nonzero(good) == 0:
                         return None
                     idx = (ALL_ROW[good], ALL_COL[good])
+                    _pixid = ALL_PIXID[good]
                 else:
                     idx = (ALL_ROW, ALL_COL)
+                    _pixid = ALL_PIXID[good]
 
-                # record("row", idx[0].astype(np.int32))
-                # record("col", idx[1].astype(np.int32))
                 det = hdul["IMAGE"].header["DETECTOR"]
-                record("pixid",    rowcoldet_to_pixid(*idx, det))
+                record("pixid",    _pixid + (det << 24))
 
                 record("flux",     byteswap(hdul["IMAGE"].data[*idx]).astype(np.float32))
                 record("variance", byteswap(hdul["VARIANCE"].data[*idx]).astype(np.float32))
@@ -116,27 +80,10 @@ class BatchWriter:
                 # sky position and derived quantities
                 wcs = WCS(header=hdul["IMAGE"].header)
                 ra, dec = wcs.wcs_pix2world(*idx, 0)
-                # record("ra", ra)
-                # record("dec", dec)
-
-                record("ux", np.cos(np.radians(dec)) * np.cos(np.radians(ra)))
-                record("uy", np.cos(np.radians(dec)) * np.sin(np.radians(ra)))
-                record("uz", np.sin(np.radians(dec)))
-
                 sc = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
-                record("hp02", HEALPIX02.skycoord_to_healpix(sc))
-                record("hp20", HEALPIX20.skycoord_to_healpix(sc))
-
-                # wavelength
-                # del hdul["IMAGE"].header["A_ORDER"]
-                # del hdul["IMAGE"].header["B_ORDER"]
-                # del hdul["IMAGE"].header["AP_ORDER"]
-                # del hdul["IMAGE"].header["BP_ORDER"]
-                # wave_wcs = WCS(header=hdul["IMAGE"].header, fobj=hdul, key="W")
-                # wave_wcs.sip = None
-                # lam, dlam = wave_wcs.wcs_pix2world(idx, 0).T
-                # record("wavelen", lam)
-                # record("waveband", dlam)
+                record("hphigh", HEALPIX_HI.skycoord_to_healpix(sc))
+                # record("hppart", HEALPIX_LO.skycoord_to_healpix(sc))
+                record("hppart", pixels["hphigh"] >> (2 * (HP_HI_LEVEL - HP_LO_LEVEL)))
 
                 # image-level stuff
                 t_beg = hdul["IMAGE"].header["MJD-BEG"]
@@ -145,13 +92,23 @@ class BatchWriter:
                 imageid = hdul["IMAGE"].header["EXPIDN"]
                 record("imageid", np.array([imageid for _ in range(len(idx[0]))]))
 
-                self.pixel_tables.append(pa.table(pixels))
-
                 self.images["imageid"].append(imageid)
                 self.images["filepath"].append(filepath)
                 self.images["obsid"].append(obsid)
                 self.images["t_beg"].append(t_beg)
                 self.images["t_end"].append(t_end)
+
+                _parts = np.unique(pixels["hppart"])
+                for _p in _parts:
+                    mask = pixels["hppart"] == _p
+                    if _p in self.pixel_parts:
+                        for k, v in pixels.items():
+                            self.pixel_parts[_p][k].append(v[mask])
+                    else:
+                        self.pixel_parts[_p] = {}
+                        for k, v in pixels.items():
+                            self.pixel_parts[_p][k] = [v[mask]]
+
         except OSError:
             print(f"ERROR OPENING {filepath}")
             return
@@ -161,33 +118,26 @@ class BatchWriter:
                 self.write()
 
     def count(self):
-        # return len(self.images["imageid"])
-        return len(self.pixel_tables)
+        return len(self.images["filepath"])
 
     def clear(self):
         for key in self.images.keys():
             self.images[key] = []
-        self.pixel_tables = []
-        # for key in self.pixels.keys():
-        #     self.pixels[key] = []
-
-    # def flatten_pixels(self):
-    #     for key, value in self.pixels.items():
-    #         self.pixels[key] = np.concatenate(value)
+        self.pixel_parts = {}
 
     def _write_pixels(self):
-        # self.flatten_pixels()
         time = now_simpleformat()
-        ds.write_dataset(
-            data=pa.concat_tables(self.pixel_tables),
-            base_dir=PIXEL_DB_PATH,
-            partitioning=["hp02"],
-            partitioning_flavor="hive",
-            format="parquet",
-            file_options=self.file_opt,
-            basename_template=f"release_{time}_{{i}}.parquet",
-            existing_data_behavior="overwrite_or_ignore",
-        )
+
+        for p, data in self.pixel_parts.items():
+            part_dir = PIXEL_DB_PATH / f"hppart={p}"
+            part_dir.mkdir(exist_ok=True)
+
+            path = part_dir / f"chunk_{time}.hdf5"
+            with h5py.File(path, 'w') as f:
+                for k, arr_list in data.items():
+                    if k == 'hppart':
+                        continue
+                    f[k] = np.concatenate(arr_list)
 
     def _write_images(self):
         if not IMAGE_DB_PATH.exists():
