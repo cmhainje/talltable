@@ -10,6 +10,7 @@ import logging
 
 from argparse import ArgumentParser
 from glob import glob
+from os.path import basename
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -33,12 +34,10 @@ def parse():
 
 
 def main(args):
-    data_files = glob(
-        str(DATA_DIR / (("*" if args.mjd is None else f"{args.mjd}") + "/*.fits"))
-    )
-    done_before = set(get_image_filepaths()) if not args.force else set()
-    to_ingest = set(data_files) - done_before
-    to_ingest = sorted(list(to_ingest))
+    mjd = "[0-9][0-9][0-9][0-9][0-9]" if args.mjd is None else f"{args.mjd}"
+    data_files = glob(str(DATA_DIR / f"{mjd}/*.fits"))
+    done_before = set(basename(p) for p in get_image_filepaths()) if not args.force else set()
+    to_ingest = sorted([p for p in data_files if basename(p) not in done_before])
     logger.info("%d files to ingest", len(to_ingest))
 
     if args.num_workers > 1:
