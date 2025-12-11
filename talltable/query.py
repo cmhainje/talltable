@@ -1,10 +1,12 @@
 import duckdb
 
-from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
+from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH, WAVES_DB_PATH, EPHEM_DB_PATH
 
 
 DUCK_IMAGE = "'" + str(IMAGE_DB_PATH) + "'"
-DUCK_PIXEL = "'" + str(PIXEL_DB_PATH / "*/release_*.parquet") + "'"
+DUCK_WAVES = "'" + str(WAVES_DB_PATH) + "'"
+DUCK_EPHEM = "'" + str(EPHEM_DB_PATH) + "'"
+DUCK_PIXEL = "'" + str(PIXEL_DB_PATH / "*/*.parquet") + "'"
 
 
 def get_image_filepaths() -> list[str]:
