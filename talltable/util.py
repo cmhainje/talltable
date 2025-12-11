@@ -1,5 +1,14 @@
 import contextlib
 import signal
+from datetime import datetime
+
+
+def now_simpleformat() -> str:
+    time = datetime.now().isoformat(timespec='seconds')
+    time = time.replace('-', '')
+    time = time.replace(':', '')
+    time = time.replace('T', '-')
+    return time
 
 
 @contextlib.contextmanager
