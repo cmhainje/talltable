@@ -13,15 +13,15 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
-from .pixid import rowcoldet_to_pixid
+from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat
 
 
 _idx = np.arange(2040, dtype=np.uint32)
 ALL_ROW, ALL_COL = map(np.ravel, np.meshgrid(_idx, _idx, indexing='ij'))
-ALL_PIXID = rowcoldet_to_pixid(ALL_ROW, ALL_COL, 0)
+ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
 
-HP_LO_LEVEL = 2
+HP_LO_LEVEL = 8
 HP_HI_LEVEL = 24
 
 HEALPIX_LO = HEALPix(nside=2**HP_LO_LEVEL, order="nested", frame="icrs")
@@ -49,13 +49,13 @@ def process_image(filepath):
                 if np.count_nonzero(good) == 0:
                     return None
                 idx = (ALL_ROW[good], ALL_COL[good])
-                _pixid = ALL_PIXID[good]
+                _waveid = ALL_WAVEID[good]
             else:
                 idx = (ALL_ROW, ALL_COL)
-                _pixid = ALL_PIXID[good]
+                _waveid = ALL_WAVEID[good]
 
             det = hdul["IMAGE"].header["DETECTOR"]
-            record("pixid",    _pixid + (det << 24))
+            record("waveid",    _waveid + (det << 24))
 
             record("flux",     byteswap(hdul["IMAGE"].data[*idx]).astype(np.float32))
             record("variance", byteswap(hdul["VARIANCE"].data[*idx]).astype(np.float32))
@@ -104,9 +104,13 @@ class ParallelBatchWriter:
             compression_level=3,
         )
 
+        self.executor = ProcessPoolExecutor(max_workers=self.num_workers)
+
+    def __del__(self):
+        self.executor.shutdown(wait=True)
+
     def process_batch(self, filepaths):
-        with ProcessPoolExecutor(max_workers=self.num_workers) as ex:
-            images, pixels = list(zip(*[r for r in ex.map(process_image, filepaths) if r is not None]))
+        images, pixels = list(zip(*[r for r in self.executor.map(process_image, filepaths) if r is not None]))
         images = pa.table({k: [row[k] for row in images] for k in images[0]})
         pixels = {k: np.concatenate([d[k] for d in pixels]) for k in pixels[0]}
         pixel_parts = { p: { k: v[ pixels["hppart"] == p ] for k, v in pixels.items() if k != "hppart" } for p in np.unique(pixels["hppart"]) }
