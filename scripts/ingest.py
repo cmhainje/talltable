@@ -3,10 +3,15 @@ ingest.py
 author: Connor Hainje
 
 usage:
-python ingest.py
+python ingest.py <filelist> -N <workers> -C <chunk_size>
+
+Supports SLURM parallelism via SLURM_PROCID and SLURM_NTASKS env vars.
+Each task processes a strided subset of the file list and writes to its own
+intermediate image parquet file. Run compact.py after to merge.
 """
 
 import logging
+import os
 
 from argparse import ArgumentParser
 from glob import glob
@@ -20,16 +25,12 @@ from talltable.parallel_batch import ParallelBatchWriter
 from talltable.query import get_image_filepaths
 from talltable.paths import DATA_DIR
 
-import multiprocessing as mp
-mp.set_start_method('spawn', force=True)
-
 
 logger = logging.getLogger(__name__)
 
 
 def parse():
     ap = ArgumentParser()
-    # ap.add_argument("mjd", nargs="?", default=None)
     ap.add_argument("infile")
     ap.add_argument("-N", "--num-workers", type=int, nargs="?", default=8)
     ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=16)
@@ -38,29 +39,39 @@ def parse():
 
 
 def main(args):
-    # mjd = "[0-9][0-9][0-9][0-9][0-9]" if args.mjd is None else f"{args.mjd}"
-    # data_files = glob(str(DATA_DIR / f"{mjd}/*.fits"))
+    task_id = int(os.environ.get("SLURM_PROCID", 0))
+    num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
+    logger.info("SLURM task %d of %d", task_id, num_tasks)
 
     with open(args.infile, "r") as f:
-        data_files = [ str(DATA_DIR / u.strip()) for u in f.readlines()]
+        data_files = [str(DATA_DIR / u.strip()) for u in f.readlines()]
 
-    done_before = set(basename(p) for p in get_image_filepaths()) if not args.force else set()
+    done_before = (
+        set(basename(p) for p in get_image_filepaths()) if not args.force else set()
+    )
     to_ingest = sorted([p for p in data_files if basename(p) not in done_before])
-    logger.info("%d files to ingest", len(to_ingest))
+
+    if num_tasks > 1:
+        to_ingest = to_ingest[task_id::num_tasks]
+
+    logger.info("task %d: %d files to ingest", task_id, len(to_ingest))
+
+    if len(to_ingest) == 0:
+        return
 
     if args.num_workers > 1:
-        batch = ParallelBatchWriter(num_workers=args.num_workers)
+        batch = ParallelBatchWriter(num_workers=args.num_workers, task_id=task_id)
 
-        for index in tqdm(range(0, len(to_ingest), args.chunk_size), unit='chunk'):
-            filepaths = to_ingest[index:index+args.chunk_size]
+        for index in tqdm(range(0, len(to_ingest), args.chunk_size), unit="chunk"):
+            filepaths = to_ingest[index : index + args.chunk_size]
             batch.process_batch(filepaths)
 
     else:
-        batch = BatchWriter(chunk_size=args.chunk_size)
+        batch = BatchWriter(chunk_size=args.chunk_size, task_id=task_id)
 
         for index in tqdm(range(len(to_ingest))):
             filepath = to_ingest[index]
-            logger.info("processing %s", str(filepath).replace(str(DATA_DIR) + '/', ''))
+            logger.info("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
             batch.process_image(filepath)
 
         # if we finish with an unwritten partial chunk, write it out

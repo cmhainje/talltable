@@ -9,13 +9,41 @@ from glob import glob
 from pathlib import Path
 from tqdm import tqdm
 
-from talltable.paths import PIXEL_DB_PATH
+from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR
+
+
+def merge_image_parts():
+    """Merge per-task image parquet files into the final IMAGE_DB_PATH."""
+    part_files = sorted(glob(str(IMAGE_PARTS_DIR / "image_task*.parquet")))
+    if not part_files:
+        print("no image part files to merge")
+        return
+
+    print(f"merging {len(part_files)} image part files")
+    tables = []
+    if IMAGE_DB_PATH.exists():
+        tables.append(pq.read_table(IMAGE_DB_PATH))
+    for f in part_files:
+        tables.append(pq.read_table(f))
+
+    merged = pa.concat_tables(tables)
+    tmp_file = Path(str(IMAGE_DB_PATH) + ".tmp")
+    pq.write_table(merged, tmp_file)
+    tmp_file.replace(IMAGE_DB_PATH)
+
+    for f in part_files:
+        remove(f)
+    print(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
 
 
 def main():
     index  = int(os.environ.get("SLURM_PROCID", 0))
     number = int(os.environ.get("SLURM_NTASKS", 1))
     print(f"processing index {index} of {number} tasks")
+
+    # merge image parts (only task 0, since it's a single-file operation)
+    if index == 0:
+        merge_image_parts()
 
     def part_num(path):
         return int(path.split('hppart=')[1])

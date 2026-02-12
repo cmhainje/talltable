@@ -12,7 +12,7 @@ from astropy_healpix import HEALPix
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
+from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat
 
@@ -94,10 +94,11 @@ def process_image(filepath):
 
 
 class ParallelBatchWriter:
-    def __init__(self, num_workers=8):
+    def __init__(self, num_workers=8, task_id=0):
         self.num_workers = num_workers
+        self.task_id = task_id
 
-        self.time = now_simpleformat()
+        self.time = f"{now_simpleformat()}_t{task_id}"
 
         self.file_opt = ds.ParquetFileFormat().make_write_options(
             compression="zstd",
@@ -141,7 +142,8 @@ class ParallelBatchWriter:
 
 
     def write_images(self, images):
-        db_path = IMAGE_DB_PATH
+        IMAGE_PARTS_DIR.mkdir(exist_ok=True)
+        db_path = image_part_path(self.task_id)
 
         if not db_path.exists():
             pq.write_table(images, db_path)
@@ -153,4 +155,4 @@ class ParallelBatchWriter:
             for i in range(existing_file.num_row_groups):
                 w.write_table(existing_file.read_row_group(i))
             w.write_table(pa.table(images))
-        tmp_file.replace(db_path)  # overwrite existing file
+        tmp_file.replace(db_path)

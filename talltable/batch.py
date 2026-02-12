@@ -10,7 +10,7 @@ from astropy.wcs import WCS
 from astropy_healpix import HEALPix
 from pathlib import Path
 
-from .paths import IMAGE_DB_PATH, PIXEL_DB_PATH
+from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat
 
@@ -27,10 +27,11 @@ HEALPIX_HI = HEALPix(nside=2**HP_HI_LEVEL, order="nested", frame="icrs")
 
 
 class BatchWriter:
-    def __init__(self, chunk_size=16, skip_bad=True, auto_write=True):
+    def __init__(self, chunk_size=16, skip_bad=True, auto_write=True, task_id=0):
         self.chunk_size = chunk_size
         self.skip_bad = skip_bad
         self.auto_write = auto_write
+        self.task_id = task_id
 
         self.images = {
             "imageid": [],
@@ -126,7 +127,7 @@ class BatchWriter:
         self.pixel_parts = {}
 
     def _write_pixels(self):
-        time = now_simpleformat()
+        time = f"{now_simpleformat()}_t{self.task_id}"
 
         for p, data in self.pixel_parts.items():
             part_dir = PIXEL_DB_PATH / f"hppart={p}"
@@ -140,17 +141,20 @@ class BatchWriter:
                     f[k] = np.concatenate(arr_list)
 
     def _write_images(self):
-        if not IMAGE_DB_PATH.exists():
-            pq.write_table(pa.table(self.images), IMAGE_DB_PATH)
+        IMAGE_PARTS_DIR.mkdir(exist_ok=True)
+        db_path = image_part_path(self.task_id)
+
+        if not db_path.exists():
+            pq.write_table(pa.table(self.images), db_path)
             return
 
-        tmp_file = Path(str(IMAGE_DB_PATH) + ".tmp")
-        existing_file = pq.ParquetFile(IMAGE_DB_PATH)
+        tmp_file = Path(str(db_path) + ".tmp")
+        existing_file = pq.ParquetFile(db_path)
         with pq.ParquetWriter(tmp_file, existing_file.schema_arrow) as w:
             for i in range(existing_file.num_row_groups):
                 w.write_table(existing_file.read_row_group(i))
             w.write_table(pa.table(self.images))
-        tmp_file.replace(IMAGE_DB_PATH)  # overwrite existing file
+        tmp_file.replace(db_path)
 
     def write(self):
         with defer_interrupt():
