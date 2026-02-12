@@ -20,22 +20,30 @@ from talltable.parallel_batch import ParallelBatchWriter
 from talltable.query import get_image_filepaths
 from talltable.paths import DATA_DIR
 
+import multiprocessing as mp
+mp.set_start_method('spawn', force=True)
+
 
 logger = logging.getLogger(__name__)
 
 
 def parse():
     ap = ArgumentParser()
-    ap.add_argument("mjd", nargs="?", default=None)
+    # ap.add_argument("mjd", nargs="?", default=None)
+    ap.add_argument("infile")
     ap.add_argument("-N", "--num-workers", type=int, nargs="?", default=8)
     ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=16)
-    ap.add_argument("-f", "--force", action="store_true", help="force (re-ingest)")
+    ap.add_argument("-F", "--force", action="store_true", help="force (re-ingest)")
     return ap.parse_args()
 
 
 def main(args):
-    mjd = "[0-9][0-9][0-9][0-9][0-9]" if args.mjd is None else f"{args.mjd}"
-    data_files = glob(str(DATA_DIR / f"{mjd}/*.fits"))
+    # mjd = "[0-9][0-9][0-9][0-9][0-9]" if args.mjd is None else f"{args.mjd}"
+    # data_files = glob(str(DATA_DIR / f"{mjd}/*.fits"))
+
+    with open(args.infile, "r") as f:
+        data_files = [ str(DATA_DIR / u.strip()) for u in f.readlines()]
+
     done_before = set(basename(p) for p in get_image_filepaths()) if not args.force else set()
     to_ingest = sorted([p for p in data_files if basename(p) not in done_before])
     logger.info("%d files to ingest", len(to_ingest))
