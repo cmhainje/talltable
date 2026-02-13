@@ -1,14 +1,12 @@
 #!/bin/bash
 #SBATCH -J rosette
 #SBATCH --nodes 1
-#SBATCH --ntasks-per-node 32
+#SBATCH --ntasks-per-node 48
 #SBATCH --cpus-per-task 1
 #SBATCH -o /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
 #SBATCH -e /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
 #SBATCH --mail-type ALL
 #SBATCH --mail-user ch4407@nyu.edu
-
-echo $SLURM_CPUS_PER_TASK
 
 module load uv
 cd /mnt/home/chainje/spxperiments/scripts
