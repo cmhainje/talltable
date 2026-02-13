@@ -76,7 +76,7 @@ def main(args):
 
     for index in tqdm(range(len(to_ingest)), desc=f"task {task_id}"):
         filepath = to_ingest[index]
-        logger.info("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
+        logger.debug("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
         batch.process_image(filepath)
 
     # if we finish with an unwritten partial chunk, write it out
@@ -85,7 +85,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.INFO)
     args = parse()
     with logging_redirect_tqdm():
         main(args)
