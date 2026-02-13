@@ -63,7 +63,7 @@ def main():
             data = dict()
             with h5py.File(filepath, 'r') as f:
                 for key in f.keys():
-                    data[key] = f[key][:].squeeze()
+                    data[key] = np.atleast_1d(f[key][:].squeeze())
             try:
                 return pa.table(data)
             except pa.lib.ArrowInvalid as e:
