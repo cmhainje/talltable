@@ -23,7 +23,7 @@ from talltable.batch import BatchWriter
 from talltable.parallel_batch import ParallelBatchWriter
 
 from talltable.query import get_image_filepaths
-from talltable.paths import DATA_DIR
+from talltable.paths import DATA_DIR, PIXEL_DB_PATH, IMAGE_PARTS_DIR
 
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 def parse():
     ap = ArgumentParser()
     ap.add_argument("infile")
-    ap.add_argument("-N", "--num-workers", type=int, nargs="?", default=8)
+    # ap.add_argument("-N", "--num-workers", type=int, nargs="?", default=8)
     ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=16)
     ap.add_argument("-F", "--force", action="store_true", help="force (re-ingest)")
     return ap.parse_args()
@@ -42,6 +42,11 @@ def main(args):
     task_id = int(os.environ.get("SLURM_PROCID", 0))
     num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
     logger.info("SLURM task %d of %d", task_id, num_tasks)
+
+    if task_id == 0:
+        PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
+        IMAGE_PARTS_DIR.mkdir(exist_ok=True, parents=True)
+
 
     with open(args.infile, "r") as f:
         data_files = [str(DATA_DIR / u.strip()) for u in f.readlines()]
@@ -59,28 +64,28 @@ def main(args):
     if len(to_ingest) == 0:
         return
 
-    if args.num_workers > 1:
-        batch = ParallelBatchWriter(num_workers=args.num_workers, task_id=task_id)
+    # if args.num_workers > 1:
+    #     batch = ParallelBatchWriter(num_workers=args.num_workers, task_id=task_id)
 
-        for index in tqdm(range(0, len(to_ingest), args.chunk_size), unit="chunk"):
-            filepaths = to_ingest[index : index + args.chunk_size]
-            batch.process_batch(filepaths)
+    #     for index in tqdm(range(0, len(to_ingest), args.chunk_size), unit="chunk"):
+    #         filepaths = to_ingest[index : index + args.chunk_size]
+    #         batch.process_batch(filepaths)
 
-    else:
-        batch = BatchWriter(chunk_size=args.chunk_size, task_id=task_id)
+    # else:
+    batch = BatchWriter(chunk_size=args.chunk_size, task_id=task_id)
 
-        for index in tqdm(range(len(to_ingest))):
-            filepath = to_ingest[index]
-            logger.info("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
-            batch.process_image(filepath)
+    for index in tqdm(range(len(to_ingest)), desc=f"task {task_id}"):
+        filepath = to_ingest[index]
+        logger.info("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
+        batch.process_image(filepath)
 
-        # if we finish with an unwritten partial chunk, write it out
-        if batch.count() > 0:
-            batch.write()
+    # if we finish with an unwritten partial chunk, write it out
+    if batch.count() > 0:
+        batch.write()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.WARNING)
     args = parse()
     with logging_redirect_tqdm():
         main(args)
