@@ -80,7 +80,7 @@ class BatchWriter:
 
                 # sky position and derived quantities
                 wcs = WCS(header=hdul["IMAGE"].header)
-                ra, dec = wcs.wcs_pix2world(idx[1], idx[0], 0)
+                ra, dec = wcs.all_pix2world(idx[1], idx[0], 0)
                 sc = SkyCoord(ra=ra, dec=dec, unit="deg", frame="icrs")
                 record("hphigh", HEALPIX_HI.skycoord_to_healpix(sc))
                 # record("hppart", HEALPIX_LO.skycoord_to_healpix(sc))
