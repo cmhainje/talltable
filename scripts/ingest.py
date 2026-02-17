@@ -20,7 +20,6 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from talltable.batch import BatchWriter
-from talltable.parallel_batch import ParallelBatchWriter
 
 from talltable.query import get_image_filepaths
 from talltable.paths import DATA_DIR, PIXEL_DB_PATH, IMAGE_PARTS_DIR
@@ -32,7 +31,6 @@ logger = logging.getLogger(__name__)
 def parse():
     ap = ArgumentParser()
     ap.add_argument("infile")
-    # ap.add_argument("-N", "--num-workers", type=int, nargs="?", default=8)
     ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=16)
     ap.add_argument("-F", "--force", action="store_true", help="force (re-ingest)")
     return ap.parse_args()
@@ -47,6 +45,11 @@ def main(args):
         PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
         IMAGE_PARTS_DIR.mkdir(exist_ok=True, parents=True)
 
+    if IMAGE_PARTS_DIR.exists() and len(glob(str(IMAGE_PARTS_DIR / "*.parquet"))) > 0:
+        raise RuntimeError(
+            f"there are existing image part files in {IMAGE_PARTS_DIR}! "
+            "did you run `compact` after the last `ingest`?"
+        )
 
     with open(args.infile, "r") as f:
         data_files = [str(DATA_DIR / u.strip()) for u in f.readlines()]
@@ -64,14 +67,6 @@ def main(args):
     if len(to_ingest) == 0:
         return
 
-    # if args.num_workers > 1:
-    #     batch = ParallelBatchWriter(num_workers=args.num_workers, task_id=task_id)
-
-    #     for index in tqdm(range(0, len(to_ingest), args.chunk_size), unit="chunk"):
-    #         filepaths = to_ingest[index : index + args.chunk_size]
-    #         batch.process_batch(filepaths)
-
-    # else:
     batch = BatchWriter(chunk_size=args.chunk_size, task_id=task_id)
 
     for index in tqdm(range(len(to_ingest)), desc=f"task {task_id}"):
