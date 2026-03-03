@@ -1,4 +1,3 @@
-import duckdb
 import h5py
 import healpy as hp
 import numpy as np
@@ -10,43 +9,15 @@ from astropy.wcs import WCS
 from itertools import product
 from pathlib import Path
 
-from .constants import (
-    ALL_ROW,
-    ALL_COL,
-    HP_PART_C_LEVEL,
-    HP_PART_F_LEVEL,
-    HP_HI_LEVEL,
-    NORTH_DEEP_FIELD,
-    SOUTH_DEEP_FIELD,
-)
+from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL
 from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path
-from .query import DUCK_WAVES
-from .waveid import rowcoldet_to_waveid, waveid_to_rowcoldet
+from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat, byteswap
+from .partition import partition
 
 
 ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
-
-
-def to_uvec(ra_deg, dec_deg):
-    ra = np.radians(ra_deg)
-    dec = np.radians(dec_deg)
-    x = np.cos(dec) * np.cos(ra)
-    y = np.cos(dec) * np.sin(ra)
-    z = np.sin(dec)
-    return np.stack([x, y, z], axis=1)
-
-
-_north_icrs = NORTH_DEEP_FIELD.transform_to("icrs")
-_south_icrs = SOUTH_DEEP_FIELD.transform_to("icrs")
-DEEP_FIELDS = to_uvec(
-    np.array([_north_icrs.ra.deg, _south_icrs.ra.deg]),
-    np.array([_north_icrs.dec.deg, _south_icrs.dec.deg]),
-)
-DEEP_FIELD_COS_RADIUS = np.cos(np.radians(6))  # cos(6 deg)
-
-
-PARTITION_COLUMNS = ["hppart", "dfpart", "wavepart"]
+PARTITION_COLUMNS = ["hppart", "dfpart"]
 
 
 class BatchWriter:
@@ -65,13 +36,6 @@ class BatchWriter:
 
         self.pixel_parts = {}
 
-        # fetch the wavelength partitions for each pixel
-        result = duckdb.sql(
-            f"SELECT waveid, wavepart FROM {DUCK_WAVES} ORDER BY waveid"
-        ).fetchnumpy()
-        _, _, wavedets = waveid_to_rowcoldet(result["waveid"])
-        self.waveparts = {d: result["wavepart"][wavedets == d] for d in range(1, 7)}
-
     def process_image(self, filepath):
         pixels = dict()
 
@@ -85,31 +49,25 @@ class BatchWriter:
 
                 det = hdul["IMAGE"].header["DETECTOR"]
                 record("waveid", _waveid + (det << 24))
-                record("wavepart", self.waveparts[det])
 
-                record("flux", byteswap(hdul["IMAGE"].data[*idx]).astype(np.float32))
-                record(
-                    "variance", byteswap(hdul["VARIANCE"].data[*idx]).astype(np.float32)
-                )
-                record("zodi", byteswap(hdul["ZODI"].data[*idx]).astype(np.float32))
+                def _numpify(key, dtype=np.float32):
+                    return byteswap(hdul[key].data[*idx]).astype(dtype)
 
-                record("flags", byteswap(hdul["FLAGS"].data[*idx]).astype(np.int32))
+                record("flux", _numpify("IMAGE"))
+                record("variance", _numpify("VARIANCE"))
+                record("zodi", _numpify("ZODI"))
+                record("flags", _numpify("FLAGS"), dtype=np.int32)
 
                 # sky position and derived quantities
                 wcs = WCS(header=hdul["IMAGE"].header)
                 ra, dec = wcs.all_pix2world(idx[1], idx[0], 0)
 
-                hphi = hp.ang2pix(2**HP_HI_LEVEL, ra, dec, nest=True, lonlat=True)
+                hphi = hp.ang2pix(2**HP_HIGH_LEVEL, ra, dec, nest=True, lonlat=True)
                 record("hphigh", hphi)
-                record("hppart", hphi >> (2 * (HP_HI_LEVEL - HP_PART_C_LEVEL)))
-                record("dfpart", hphi >> (2 * (HP_HI_LEVEL - HP_PART_F_LEVEL)))
 
-                # is it in the deep fields?
-                uvecs = to_uvec(ra, dec)
-                cos_seps = DEEP_FIELDS @ uvecs.T
-                in_df = np.any(cos_seps > DEEP_FIELD_COS_RADIUS, axis=0)
-                # if not in deep field, set dfpart to a bad value
-                pixels["dfpart"][~in_df] = -1
+                hppart, dfpart = partition(ra, dec)
+                record("hppart", hppart)
+                record("dfpart", dfpart)
 
                 # image-level stuff
                 t_beg = hdul["IMAGE"].header["MJD-BEG"]
