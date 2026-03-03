@@ -48,7 +48,7 @@ def main():
     partitions = [
         Path(p)
         for p in sorted(
-            glob(str(PIXEL_DB_PATH / "hppart=*/dfpart=*/wavepart=*")),
+            glob(str(PIXEL_DB_PATH / "hppart=*/dfpart=*")),
         )
     ]
 
