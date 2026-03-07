@@ -18,12 +18,11 @@ def to_uvec(ra_deg, dec_deg):
     return np.stack([x, y, z], axis=1)
 
 
-_deep_icrs = list(
-    map(lambda x: x.transform_to("icrs"), (NORTH_DEEP_FIELD, SOUTH_DEEP_FIELD))
-)
+_north_icrs = NORTH_DEEP_FIELD.transform_to("icrs")
+_south_icrs = SOUTH_DEEP_FIELD.transform_to("icrs")
 DEEP_FIELDS = to_uvec(
-    np.array([x.ra.deg for x in _deep_icrs]),
-    np.array([x.dec.deg for x in _deep_icrs]),
+    np.array([_north_icrs.ra.deg, _south_icrs.ra.deg]),
+    np.array([_north_icrs.dec.deg, _south_icrs.dec.deg]),
 )
 DEEP_FIELD_COS_RADIUS = np.cos(np.radians(DF_SAFE_RADIUS))  # cos(6 deg)
 
@@ -36,7 +35,7 @@ def partition(ra, dec):
     hp_part = df_part >> (2 * (DF_PART_LEVEL - HP_PART_LEVEL))
 
     # if not in deep field, set dfpart to a bad value
-    in_df = np.any(DEEP_FIELDS @ to_uvec(ra, dec) > DEEP_FIELD_COS_RADIUS, axis=0)
+    in_df = np.any((DEEP_FIELDS @ to_uvec(ra, dec).T) > DEEP_FIELD_COS_RADIUS, axis=0)
     df_part[~in_df] = -1
 
     if scalar_input:
