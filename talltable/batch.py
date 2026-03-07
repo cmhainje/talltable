@@ -56,7 +56,7 @@ class BatchWriter:
                 record("flux", _numpify("IMAGE"))
                 record("variance", _numpify("VARIANCE"))
                 record("zodi", _numpify("ZODI"))
-                record("flags", _numpify("FLAGS"), dtype=np.int32)
+                record("flags", _numpify("FLAGS", dtype=np.int32))
 
                 # sky position and derived quantities
                 wcs = WCS(header=hdul["IMAGE"].header)
