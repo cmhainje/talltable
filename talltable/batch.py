@@ -6,7 +6,6 @@ import pyarrow.parquet as pq
 
 from astropy.io import fits
 from astropy.wcs import WCS
-from itertools import product
 from pathlib import Path
 
 from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL
@@ -17,7 +16,6 @@ from .partition import partition
 
 
 ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
-PARTITION_COLUMNS = ["hppart", "dfpart"]
 
 
 class BatchWriter:
@@ -74,7 +72,7 @@ class BatchWriter:
                 t_end = hdul["IMAGE"].header["MJD-END"]
                 obsid = hdul["IMAGE"].header["OBSID"]
                 imageid = hdul["IMAGE"].header["EXPIDN"]
-                record("imageid", np.array([imageid for _ in range(len(idx[0]))]))
+                record("imageid", np.full(len(idx[0]), imageid))
 
                 self.images["imageid"].append(imageid)
                 self.images["filepath"].append(filepath)
@@ -82,14 +80,17 @@ class BatchWriter:
                 self.images["t_beg"].append(t_beg)
                 self.images["t_end"].append(t_end)
 
-                _parts = product(*[np.unique(pixels[c]) for c in PARTITION_COLUMNS])
-                for _part in _parts:
-                    mask = np.logical_and.reduce(
-                        [pixels[c] == v for c, v in zip(PARTITION_COLUMNS, _part)]
-                    )
-                    if np.count_nonzero(mask) == 0:
+                u_parts, inverse = np.unique(
+                    np.stack((pixels['hppart'], pixels['dfpart']), axis=1),
+                    axis=0,
+                    return_inverse=True,
+                )
+                for i, (_hp, _df) in enumerate(u_parts):
+                    mask = (inverse == i)
+                    if np.count_nonzero(mask) == 0:  # should not happen
                         continue
 
+                    _part = (_hp, _df)
                     if _part in self.pixel_parts:
                         for k, v in pixels.items():
                             self.pixel_parts[_part][k].append(v[mask])
@@ -117,15 +118,15 @@ class BatchWriter:
     def _write_pixels(self):
         time = f"{now_simpleformat()}_t{self.task_id}"
 
-        for p, data in self.pixel_parts.items():
-            part_path = "/".join(f"{c}={v}" for c, v in zip(PARTITION_COLUMNS, p))
+        for (_hp, _df), data in self.pixel_parts.items():
+            part_path = f"hppart={_hp}/dfpart={_df}"
             part_dir = PIXEL_DB_PATH / part_path
             part_dir.mkdir(exist_ok=True, parents=True)
 
             path = part_dir / f"chunk_{time}.hdf5"
             with h5py.File(path, "w") as f:
                 for k, arr_list in data.items():
-                    if k in PARTITION_COLUMNS:
+                    if k in ['hppart', 'dfpart']:
                         continue
                     f[k] = np.concatenate(arr_list)
 
