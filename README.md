@@ -15,8 +15,8 @@ or, for local dev,
 
 ```bash
 git clone https://github.com/cmhainje/talltable.git
-cd spxperiments
-poetry install
+cd talltable
+uv sync
 ```
 
 ## description
