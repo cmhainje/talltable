@@ -1,4 +1,4 @@
-# spherexperimentation
+# SPHEREx talltable
 
 ## authors
 
@@ -8,20 +8,19 @@
 ## installation
 
 ```bash
-pip install git+https://github.com/cmhainje/spxperiments
+pip install git+https://github.com/cmhainje/talltable
 ```
 
 or, for local dev,
 
 ```bash
-git clone https://github.com/cmhainje/spxperiments.git
+git clone https://github.com/cmhainje/talltable.git
 cd spxperiments
 poetry install
 ```
 
-## description(s)
+## description
 
-the main experiment is `talltable`.
 we are trying to build a database of the individual pixels in the SPHEREx images.
 the desired schema is a SQL table with ~10 columns and one row per pixel.
 because there will be ~10 trillion pixels in the SPHEREx data, this will be quite a tall table.
