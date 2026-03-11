@@ -126,7 +126,6 @@ class BatchWriter:
         time = f"{now_simpleformat()}_t{self.task_id}"
 
         for part, data in self.pixel_parts.items():
-            print(f"writing part {part}")
             part_dir = PIXEL_DB_PATH / f"part={part}"
             part_dir.mkdir(exist_ok=True, parents=True)
 
