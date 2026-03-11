@@ -1,8 +1,5 @@
 from pathlib import Path
 
-SRC_DIR = Path(__file__).parent.absolute()
-PROJ_DIR = SRC_DIR.parent.absolute()
-
 DATA_DIR = Path("/mnt/sdceph/users/spherex/spherex_data_qr2")
 DB_DIR = Path("/mnt/sdceph/users/chainje/spxdb")
 
