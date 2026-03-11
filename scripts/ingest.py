@@ -87,6 +87,7 @@ if __name__ == "__main__":
         level=logging.INFO,
         filename=out_file + f".{task_id}",
         format=f"%(asctime)s [{task_id}] %(levelname)s %(message)s",
+        force=True,
     )
     args = parse()
     with logging_redirect_tqdm():
