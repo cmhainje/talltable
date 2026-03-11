@@ -8,11 +8,11 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from pathlib import Path
 
-from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL
+from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL
 from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat, byteswap
-from .partition import partition
+from .partition import level_index_to_part
 
 
 ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
@@ -63,9 +63,10 @@ class BatchWriter:
                 hphi = hp.ang2pix(2**HP_HIGH_LEVEL, ra, dec, nest=True, lonlat=True)
                 record("hphigh", hphi)
 
-                hppart, dfpart = partition(ra, dec)
-                record("hppart", hppart)
-                record("dfpart", dfpart)
+                max_part = level_index_to_part(
+                    PART_MAX_LEVEL, hphi >> (2 * (HP_HIGH_LEVEL - PART_MAX_LEVEL))
+                )
+                record("part", max_part)
 
                 # image-level stuff
                 t_beg = hdul["IMAGE"].header["MJD-BEG"]
@@ -80,17 +81,12 @@ class BatchWriter:
                 self.images["t_beg"].append(t_beg)
                 self.images["t_end"].append(t_end)
 
-                u_parts, inverse = np.unique(
-                    np.stack((pixels['hppart'], pixels['dfpart']), axis=1),
-                    axis=0,
-                    return_inverse=True,
-                )
-                for i, (_hp, _df) in enumerate(u_parts):
-                    mask = (inverse == i)
+                u_parts, inverse = np.unique(pixels["part"], return_inverse=True)
+                for i, _part in enumerate(u_parts):
+                    mask = inverse == i
                     if np.count_nonzero(mask) == 0:  # should not happen
                         continue
 
-                    _part = (_hp, _df)
                     if _part in self.pixel_parts:
                         for k, v in pixels.items():
                             self.pixel_parts[_part][k].append(v[mask])
@@ -118,15 +114,21 @@ class BatchWriter:
     def _write_pixels(self):
         time = f"{now_simpleformat()}_t{self.task_id}"
 
-        for (_hp, _df), data in self.pixel_parts.items():
-            part_path = f"hppart={_hp}/dfpart={_df}"
-            part_dir = PIXEL_DB_PATH / part_path
+        for part, data in self.pixel_parts.items():
+            # down-level the partition as needed
+            # @TODO: replace file existence checks with a lookup in the partitions table
+            for _ in range(5):
+                part_dir = PIXEL_DB_PATH / f"part={part}"
+                if part_dir.exists():
+                    break
+                part = part >> 2
+
             part_dir.mkdir(exist_ok=True, parents=True)
 
             path = part_dir / f"chunk_{time}.hdf5"
             with h5py.File(path, "w") as f:
                 for k, arr_list in data.items():
-                    if k in ['hppart', 'dfpart']:
+                    if k == "part":
                         continue
                     f[k] = np.concatenate(arr_list)
 
@@ -138,6 +140,7 @@ class BatchWriter:
             pq.write_table(pa.table(self.images), db_path)
             return
 
+        # @TODO: replace with something row-oriented
         tmp_file = Path(str(db_path) + ".tmp")
         existing_file = pq.ParquetFile(db_path)
         with pq.ParquetWriter(tmp_file, existing_file.schema_arrow) as w:

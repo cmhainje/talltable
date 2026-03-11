@@ -1,43 +1,38 @@
 import numpy as np
 import healpy as hp
-from .constants import (
-    DF_PART_LEVEL,
-    HP_PART_LEVEL,
-    DF_SAFE_RADIUS,
-    NORTH_DEEP_FIELD,
-    SOUTH_DEEP_FIELD,
-)
+from .constants import PART_MIN_LEVEL, PART_MAX_LEVEL
+from .paths import DB_DIR
 
 
-def to_uvec(ra_deg, dec_deg):
-    ra = np.radians(ra_deg)
-    dec = np.radians(dec_deg)
-    x = np.cos(dec) * np.cos(ra)
-    y = np.cos(dec) * np.sin(ra)
-    z = np.sin(dec)
-    return np.stack([x, y, z], axis=1)
+
+def part_to_level_index(part):
+    if isinstance(part, int):
+        n = part.bit_length() - 1
+    elif isinstance(part, np.ndarray):
+        n = np.frexp(part)[1] - 1
+    else:
+        raise ValueError(f"unsupported argument type: {type(part)}")
+
+    level = (n // 2) - 4
+    index = part - (1 << n)
+    return level, index
 
 
-_north_icrs = NORTH_DEEP_FIELD.transform_to("icrs")
-_south_icrs = SOUTH_DEEP_FIELD.transform_to("icrs")
-DEEP_FIELDS = to_uvec(
-    np.array([_north_icrs.ra.deg, _south_icrs.ra.deg]),
-    np.array([_north_icrs.dec.deg, _south_icrs.dec.deg]),
-)
-DEEP_FIELD_COS_RADIUS = np.cos(np.radians(DF_SAFE_RADIUS))  # cos(6 deg)
+def level_index_to_part(level, index):
+    return index + (1 << (2 * (level + 4)))
 
 
-def partition(ra, dec):
-    scalar_input = np.ndim(ra) == 0
-    ra, dec = map(np.atleast_1d, (ra, dec))
+def find_partition(ra, dec):
+    part = level_index_to_part(
+        PART_MAX_LEVEL,
+        hp.ang2pix(2**PART_MAX_LEVEL, ra, dec, nest=True, lonlat=True),
+    )
 
-    df_part = hp.ang2pix(2**DF_PART_LEVEL, ra, dec, nest=True, lonlat=True)
-    hp_part = df_part >> (2 * (DF_PART_LEVEL - HP_PART_LEVEL))
+    for _ in range(PART_MAX_LEVEL - PART_MIN_LEVEL + 1):
+        if (DB_DIR / f"part={part}/compacted.parquet").exists():
+            break
+        part = part >> 2
+    else:
+        return None
 
-    # if not in deep field, set dfpart to a bad value
-    in_df = np.any((DEEP_FIELDS @ to_uvec(ra, dec).T) > DEEP_FIELD_COS_RADIUS, axis=0)
-    df_part[~in_df] = -1
-
-    if scalar_input:
-        return hp_part.squeeze(), df_part.squeeze()
-    return hp_part, df_part
+    return part
