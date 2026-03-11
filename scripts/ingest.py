@@ -45,7 +45,7 @@ def main(args):
         PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
         IMAGE_PARTS_DIR.mkdir(exist_ok=True, parents=True)
 
-    if IMAGE_PARTS_DIR.exists() and len(IMAGE_PARTS_DIR.glob("*.parquet")) > 0:
+    if IMAGE_PARTS_DIR.exists() and len(list(IMAGE_PARTS_DIR.glob("*.parquet"))) > 0:
         raise RuntimeError(
             f"there are existing image part files in {IMAGE_PARTS_DIR}! "
             "did you run `compact` after the last `ingest`?"
