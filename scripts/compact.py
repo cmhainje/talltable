@@ -1,26 +1,35 @@
+import h5py
+import logging
+import numpy as np
+import os
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-import numpy as np
-import h5py
-import os
 
 from pathlib import Path
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
 from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR
 
 
+logger = logging.getLogger(__name__)
+task_id = int(os.environ.get("SLURM_PROCID", 0))
+num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
+job_id = os.environ.get("SLURM_JOB_ID", 0)
+out_file = os.environ.get("SLURM_JOB_STDOUT", f"./slurm-{job_id}.out")
+
+
 def merge_image_parts():
     """merge new partial image parquet files into the final images table"""
     part_files = sorted(IMAGE_PARTS_DIR.glob("image_task*.parquet"))
     if not part_files:
-        print("no image part files to merge")
+        logging.info("no image part files to merge")
         return
 
-    print(f"merging {len(part_files)} image part files")
+    logging.info(f"merging {len(part_files)} image part files")
     tables = []
     if IMAGE_DB_PATH.exists():
         tables.append(pq.read_table(IMAGE_DB_PATH))
@@ -34,13 +43,11 @@ def merge_image_parts():
 
     for f in part_files:
         f.unlink()
-    print(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
+    logging.info(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
 
 
 def main():
-    task_id = int(os.environ.get("SLURM_PROCID", 0))
-    num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
-    print(f"processing index {task_id} of {num_tasks} tasks")
+    logging.info(f"processing index {task_id} of {num_tasks} tasks")
 
     # merge image parts (only do once)
     if task_id == 0:
@@ -156,8 +163,17 @@ def main():
 
 
         except RuntimeError as e:
-            print(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
+            logging.warning(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
+
+        for handler in logger.handlers:
+            handler.flush()
 
 
 if __name__ == "__main__":
-    main()
+    logging.basicConfig(
+        level=logging.INFO,
+        filename=out_file + f".{task_id}",
+        format=f"%(asctime)s [{task_id}] %(levelname)s %(message)s",
+    )
+    with logging_redirect_tqdm():
+        main()

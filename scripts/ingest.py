@@ -14,18 +14,20 @@ import logging
 import os
 
 from argparse import ArgumentParser
-from glob import glob
 from os.path import basename
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from talltable.batch import BatchWriter
-
 from talltable.query import get_image_filepaths
 from talltable.paths import DATA_DIR, PIXEL_DB_PATH, IMAGE_PARTS_DIR
 
 
 logger = logging.getLogger(__name__)
+task_id = int(os.environ.get("SLURM_PROCID", 0))
+num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
+job_id = os.environ.get("SLURM_JOB_ID")
+out_file = os.environ.get("SLURM_JOB_STDOUT", f"./slurm-{job_id}.out")
 
 
 def parse():
@@ -37,8 +39,6 @@ def parse():
 
 
 def main(args):
-    task_id = int(os.environ.get("SLURM_PROCID", 0))
-    num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
     logger.info("SLURM task %d of %d", task_id, num_tasks)
 
     if task_id == 0:
@@ -69,10 +69,13 @@ def main(args):
 
     batch = BatchWriter(chunk_size=args.chunk_size, task_id=task_id)
 
-    for index in tqdm(range(len(to_ingest)), desc=f"task {task_id}"):
+    for index in tqdm(range(len(to_ingest))):
         filepath = to_ingest[index]
         logger.debug("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
         batch.process_image(filepath)
+
+        for handler in logger.handlers:
+            handler.flush()
 
     # if we finish with an unwritten partial chunk, write it out
     if batch.count() > 0:
@@ -80,7 +83,11 @@ def main(args):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        filename=out_file + f".{task_id}",
+        format=f"%(asctime)s [{task_id}] %(levelname)s %(message)s",
+    )
     args = parse()
     with logging_redirect_tqdm():
         main(args)
