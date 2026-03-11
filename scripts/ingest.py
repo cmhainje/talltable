@@ -3,7 +3,7 @@ ingest.py
 author: Connor Hainje
 
 usage:
-python ingest.py <filelist> -N <workers> -C <chunk_size>
+python ingest.py <filelist> -C <chunk_size>
 
 Supports SLURM parallelism via SLURM_PROCID and SLURM_NTASKS env vars.
 Each task processes a strided subset of the file list and writes to its own
@@ -12,13 +12,15 @@ intermediate image parquet file. Run compact.py after to merge.
 
 import logging
 import os
+import queue
+import threading
 
 from argparse import ArgumentParser
 from os.path import basename
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from talltable.batch import BatchWriter
+from talltable.batch import BatchWriter, read_image
 from talltable.query import get_image_filepaths
 from talltable.paths import DATA_DIR, PIXEL_DB_PATH, IMAGE_PARTS_DIR
 
@@ -33,9 +35,24 @@ out_file = os.environ.get("SLURM_JOB_STDOUT", f"./slurm-{job_id}.out")
 def parse():
     ap = ArgumentParser()
     ap.add_argument("infile")
-    ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=16)
+    ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=48)
     ap.add_argument("-F", "--force", action="store_true", help="force (re-ingest)")
     return ap.parse_args()
+
+
+_DONE = object()  # sentinel to signal end of queue
+
+
+def reader_worker(filepaths, data_queue):
+    """Read-ahead thread: reads FITS files and puts data on the queue."""
+    for filepath in filepaths:
+        try:
+            data = read_image(filepath)
+            data_queue.put(data)
+        except OSError as err:
+            logger.error("error reading %s: %s", filepath, err)
+            data_queue.put(None)  # skip marker for failed reads
+    data_queue.put(_DONE)
 
 
 def main(args):
@@ -69,17 +86,29 @@ def main(args):
 
     batch = BatchWriter(chunk_size=args.chunk_size, task_id=task_id)
 
-    for index in tqdm(range(len(to_ingest))):
-        filepath = to_ingest[index]
-        logger.debug("processing %s", str(filepath).replace(str(DATA_DIR) + "/", ""))
-        batch.process_image(filepath)
+    # read-ahead thread prefetches FITS files while main thread does compute
+    data_queue = queue.Queue(maxsize=2)
+    reader = threading.Thread(
+        target=reader_worker, args=(to_ingest, data_queue), daemon=True
+    )
+    reader.start()
 
-        for handler in logger.handlers:
-            handler.flush()
+    with tqdm(total=len(to_ingest)) as pbar:
+        while True:
+            fits_data = data_queue.get()
+            if fits_data is _DONE:
+                break
+            pbar.update(1)
+            if fits_data is None:
+                continue  # skip failed reads
+            logger.debug("processing %s", basename(fits_data.filepath))
+            batch.process_image(fits_data)
 
-    # if we finish with an unwritten partial chunk, write it out
+    # flush any remaining buffered data
     if batch.count() > 0:
         batch.write()
+
+    reader.join(timeout=5)
 
 
 if __name__ == "__main__":
