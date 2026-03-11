@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -630,59 +630,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/30/3e/a80a8c077fd798951169626cde3e239adeba7dab75deb3555716415bd9b0/fqdn-1.5.1.tar.gz", hash = "sha256:105ed3677e767fb5ca086a0c1f4bb66ebc3c100be518f0e0d755d9eae164d89f", size = 6015, upload-time = "2021-03-11T07:16:29.08Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cf/58/8acf1b3e91c58313ce5cb67df61001fc9dcd21be4fadb76c1a2d540e09ed/fqdn-1.5.1-py3-none-any.whl", hash = "sha256:3a179af3761e4df6eb2e026ff9e1a3033d3587bf980a0b1b2e1e5d08d7358014", size = 9121, upload-time = "2021-03-11T07:16:28.351Z" },
-]
-
-[[package]]
-name = "gal-gamma-xc"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "astropy" },
-    { name = "astropy-healpix" },
-    { name = "astroquery" },
-    { name = "boto3" },
-    { name = "duckdb" },
-    { name = "h5py" },
-    { name = "healpy" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "photutils" },
-    { name = "pyarrow" },
-    { name = "pyvo" },
-    { name = "scipy" },
-    { name = "tqdm" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ipykernel" },
-    { name = "ipywidgets" },
-    { name = "jupyter-resource-usage" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "astropy", specifier = ">=7.1.0,<8.0.0" },
-    { name = "astropy-healpix", specifier = ">=1.1.2,<2.0.0" },
-    { name = "astroquery", specifier = ">=0.4.10,<0.5.0" },
-    { name = "boto3", specifier = ">=1.40.60,<2.0.0" },
-    { name = "duckdb", specifier = ">=1.4.1,<2.0.0" },
-    { name = "h5py", specifier = ">=3.14.0,<4.0.0" },
-    { name = "healpy", specifier = ">=1.18.1,<2.0.0" },
-    { name = "matplotlib", specifier = ">=3.10.6,<4.0.0" },
-    { name = "numpy", specifier = ">=2.3.3,<3.0.0" },
-    { name = "photutils", specifier = ">=2.3.0,<3.0.0" },
-    { name = "pyarrow", specifier = ">=21.0.0,<22.0.0" },
-    { name = "pyvo", specifier = ">=1.7,<2.0" },
-    { name = "scipy", specifier = ">=1.16.2,<2.0.0" },
-    { name = "tqdm", specifier = ">=4.67.1,<5.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ipykernel", specifier = ">=7.2.0" },
-    { name = "ipywidgets", specifier = ">=8.1.8" },
-    { name = "jupyter-resource-usage", specifier = ">=1.2.0" },
 ]
 
 [[package]]
@@ -2178,6 +2125,61 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/28/e3/55dcc2cfbc3ca9c29519eb6884dd1415ecb53b0e934862d3559ddcb7e20b/stack_data-0.6.3.tar.gz", hash = "sha256:836a778de4fec4dcd1dcd89ed8abff8a221f58308462e1c4aa2a3cf30148f0b9", size = 44707, upload-time = "2023-09-30T13:58:05.479Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/7b/ce1eafaf1a76852e2ec9b22edecf1daa58175c090266e9f6c64afcd81d91/stack_data-0.6.3-py3-none-any.whl", hash = "sha256:d5558e0c25a4cb0853cddad3d77da9891a08cb85dd9f9f91b9f8cd66e511e695", size = 24521, upload-time = "2023-09-30T13:58:03.53Z" },
+]
+
+[[package]]
+name = "talltable"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "astropy" },
+    { name = "astropy-healpix" },
+    { name = "astroquery" },
+    { name = "beautifulsoup4" },
+    { name = "boto3" },
+    { name = "duckdb" },
+    { name = "h5py" },
+    { name = "healpy" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "photutils" },
+    { name = "pyarrow" },
+    { name = "pyvo" },
+    { name = "scipy" },
+    { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+    { name = "ipywidgets" },
+    { name = "jupyter-resource-usage" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "astropy", specifier = ">=7.1.0,<8.0.0" },
+    { name = "astropy-healpix", specifier = ">=1.1.2,<2.0.0" },
+    { name = "astroquery", specifier = ">=0.4.10,<0.5.0" },
+    { name = "beautifulsoup4", specifier = ">=4.14.3" },
+    { name = "boto3", specifier = ">=1.40.60,<2.0.0" },
+    { name = "duckdb", specifier = ">=1.4.1,<2.0.0" },
+    { name = "h5py", specifier = ">=3.14.0,<4.0.0" },
+    { name = "healpy", specifier = ">=1.18.1,<2.0.0" },
+    { name = "matplotlib", specifier = ">=3.10.6,<4.0.0" },
+    { name = "numpy", specifier = ">=2.3.3,<3.0.0" },
+    { name = "photutils", specifier = ">=2.3.0,<3.0.0" },
+    { name = "pyarrow", specifier = ">=21.0.0,<22.0.0" },
+    { name = "pyvo", specifier = ">=1.7,<2.0" },
+    { name = "scipy", specifier = ">=1.16.2,<2.0.0" },
+    { name = "tqdm", specifier = ">=4.67.1,<5.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ipykernel", specifier = ">=7.2.0" },
+    { name = "ipywidgets", specifier = ">=8.1.8" },
+    { name = "jupyter-resource-usage", specifier = ">=1.2.0" },
 ]
 
 [[package]]
