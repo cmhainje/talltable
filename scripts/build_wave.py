@@ -6,7 +6,7 @@ from astropy.io import fits
 from glob import glob
 from tqdm import tqdm
 
-from talltable.paths import DATA_DIR, WAVES_DB_PATH
+from talltable.paths import DATA_DIR, DB_DIR, WAVES_DB_PATH
 from talltable.waveid import rowcoldet_to_waveid
 from talltable.constants import ALL_ROW, ALL_COL
 from talltable.util import byteswap
@@ -34,4 +34,5 @@ for filepath in tqdm(spec_files):
 for k, v in data.items():
     data[k] = np.concatenate(v).squeeze()
 
+DB_DIR.mkdir(exist_ok=True, parents=True)
 pq.write_table(pa.table(data), WAVES_DB_PATH)
