@@ -9,7 +9,7 @@ from astropy.wcs import WCS
 from pathlib import Path
 
 from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL
-from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path
+from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat, byteswap
 from .partition import level_index_to_part
@@ -31,6 +31,11 @@ class BatchWriter:
             "t_beg": [],
             "t_end": [],
         }
+
+        self.partitions = set()
+        if PART_DB_PATH.exists():
+            with open(PART_DB_PATH, "r") as f:
+                self.partitions.update(int(p.strip()) for p in f.readlines())
 
         self.pixel_parts = {}
 
@@ -82,10 +87,16 @@ class BatchWriter:
                 self.images["t_end"].append(t_end)
 
                 u_parts, inverse = np.unique(pixels["part"], return_inverse=True)
-                for i, _part in enumerate(u_parts):
+                for i, part in enumerate(u_parts):
                     mask = inverse == i
                     if np.count_nonzero(mask) == 0:  # should not happen
                         continue
+
+                    _part = part
+                    for i in range(4):
+                        if _part in self.partitions:
+                            break
+                        _part = _part >> 2
 
                     if _part in self.pixel_parts:
                         for k, v in pixels.items():
@@ -115,14 +126,8 @@ class BatchWriter:
         time = f"{now_simpleformat()}_t{self.task_id}"
 
         for part, data in self.pixel_parts.items():
-            # down-level the partition as needed
-            # @TODO: replace file existence checks with a lookup in the partitions table
-            for _ in range(5):
-                part_dir = PIXEL_DB_PATH / f"part={part}"
-                if part_dir.exists():
-                    break
-                part = part >> 2
-
+            print(f"writing part {part}")
+            part_dir = PIXEL_DB_PATH / f"part={part}"
             part_dir.mkdir(exist_ok=True, parents=True)
 
             path = part_dir / f"chunk_{time}.hdf5"
