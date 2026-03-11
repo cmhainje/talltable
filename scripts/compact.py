@@ -5,6 +5,7 @@ import h5py
 import os
 
 from os import remove
+from os.path import exists
 from glob import glob
 from pathlib import Path
 from tqdm import tqdm
@@ -45,18 +46,27 @@ def main():
     if task_id == 0:
         merge_image_parts()
 
-    partitions = [
-        Path(p)
-        for p in sorted(
-            glob(str(PIXEL_DB_PATH / "hppart=*/dfpart=*")),
-        )
-    ]
+    h5_files = list(sorted(
+        glob(str(PIXEL_DB_PATH / "hppart=*/dfpart=*/*.hdf5")),
+    ))
+
+    partitions = {}
+    for f in h5_files:
+        chunks = f.split("/")
+        hppart = int(chunks[-3].split("=")[1])
+        dfpart = int(chunks[-2].split("=")[1])
+        part = (hppart, dfpart)
+        if part in partitions:
+            partitions[part].append(f)
+        else:
+            partitions[part] = [f]
 
     # process only every Nth partition, starting on i
+    keys = list(partitions.keys())
     if num_tasks > 1:
-        partitions = partitions[task_id::num_tasks]
+        keys = keys[task_id::num_tasks]
 
-    for part in tqdm(partitions):
+    for part in tqdm(keys):
 
         def _h5_to_table(filepath):
             data = dict()
@@ -66,7 +76,7 @@ def main():
             try:
                 return pa.table(data)
             except pa.lib.ArrowInvalid as e:
-                msg = f"failed to processing h5 file {filepath}.\n"
+                msg = f"failed to process h5 file {filepath}.\n"
                 msg += "data dict included:\n"
                 for key in data:
                     if isinstance(data[key], np.ndarray):
@@ -78,15 +88,20 @@ def main():
 
         try:
             # read in the HDF5 file(s), smoosh all together
-            h5_files = glob(str(part / "chunk_*.hdf5"))
+            #h5_files = glob(str(part / "chunk_*.hdf5"))
+            h5_files = partitions[part]
             if len(h5_files) == 0:
                 continue
 
-            pq_path = part / "compacted.parquet"
+            pq_path = h5_files[0].rsplit("/", 1)[0] + "/compacted.parquet"
 
             tables = [_h5_to_table(f) for f in h5_files]
-            if pq_path.exists():
-                tables.append(pq.read_table(pq_path))
+            if exists(pq_path):
+                try:
+                    tables.append(pq.ParquetFile(pq_path).read())
+                except pa.lib.ArrowInvalid as e:
+                    msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
+                    raise RuntimeError(msg)
             table = pa.concat_tables(tables)
 
             # sort
