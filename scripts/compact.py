@@ -1,21 +1,21 @@
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import numpy as np
 import h5py
 import os
 
-from os import remove
-from os.path import exists
-from glob import glob
 from pathlib import Path
 from tqdm import tqdm
 
+from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
+from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR
 
 
 def merge_image_parts():
-    """Merge per-task image parquet files into the final IMAGE_DB_PATH."""
-    part_files = sorted(glob(str(IMAGE_PARTS_DIR / "image_task*.parquet")))
+    """merge new partial image parquet files into the final images table"""
+    part_files = sorted(IMAGE_PARTS_DIR.glob("image_task*.parquet"))
     if not part_files:
         print("no image part files to merge")
         return
@@ -33,7 +33,7 @@ def merge_image_parts():
     tmp_file.replace(IMAGE_DB_PATH)
 
     for f in part_files:
-        remove(f)
+        f.unlink()
     print(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
 
 
@@ -46,20 +46,13 @@ def main():
     if task_id == 0:
         merge_image_parts()
 
-    h5_files = list(sorted(
-        glob(str(PIXEL_DB_PATH / "hppart=*/dfpart=*/*.hdf5")),
-    ))
-
     partitions = {}
-    for f in h5_files:
-        chunks = f.split("/")
-        hppart = int(chunks[-3].split("=")[1])
-        dfpart = int(chunks[-2].split("=")[1])
-        part = (hppart, dfpart)
+    for p in sorted(PIXEL_DB_PATH.glob("part=*/*.hdf5")):
+        part = int(p.parts[-2].split("=")[1])
         if part in partitions:
-            partitions[part].append(f)
+            partitions[part].append(p)
         else:
-            partitions[part] = [f]
+            partitions[part] = [p]
 
     # process only every Nth partition, starting on i
     keys = list(partitions.keys())
@@ -87,16 +80,18 @@ def main():
                 raise RuntimeError(msg)
 
         try:
+            level, index = part_to_level_index(part)
+
             # read in the HDF5 file(s), smoosh all together
-            #h5_files = glob(str(part / "chunk_*.hdf5"))
             h5_files = partitions[part]
             if len(h5_files) == 0:
                 continue
 
-            pq_path = h5_files[0].rsplit("/", 1)[0] + "/compacted.parquet"
+            pq_path = h5_files[0].with_name("compacted.parquet")
+            tmp_path = pq_path.with_name("tmp.parquet")
 
             tables = [_h5_to_table(f) for f in h5_files]
-            if exists(pq_path):
+            if pq_path.exists():
                 try:
                     tables.append(pq.ParquetFile(pq_path).read())
                 except pa.lib.ArrowInvalid as e:
@@ -109,18 +104,56 @@ def main():
             table = table.sort_by(sort_keys)
             sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
 
-            # write out as parquet
-            pq.write_table(
-                table,
-                pq_path,
-                compression="zstd",
-                compression_level=3,
-                sorting_columns=sorting_cols,
-            )
 
-            # clean up the intermediate HDF5 files
-            for f in h5_files:
-                remove(f)
+            # check if its too big
+            if len(table) > MAX_ROWS_PER_PART and level < PART_MAX_LEVEL:
+                # split into 4 subpartitions at the next level
+                _level = level + 1
+                for k in range(4):
+                    _index = (index << 2) + k
+                    _p = level_index_to_part(_level, _index)
+                    _part_dir = PIXEL_DB_PATH / f"part={_p}"
+                    _part_dir.mkdir(exist_ok=False)
+
+                    _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
+                    _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
+
+                    _mask = (pc.field("hphigh") >= _lo) & (pc.field("hphigh") < _hi)
+                    _table = table.filter(_mask)
+
+                    _pq_path = _part_dir / "compacted.parquet"
+                    pq.write_table(
+                        _table,
+                        _pq_path,
+                        compression="zstd",
+                        compression_level=3,
+                        sorting_columns=sorting_cols,
+                    )
+
+                # @TODO: store the full list of partitions somewhere, update it here
+
+                # clean up
+                for f in h5_files:
+                    f.unlink()
+                pq_path.unlink()
+                pq_path.parent.rmdir()
+
+
+
+            else:
+                pq.write_table(
+                    table,
+                    tmp_path,
+                    compression="zstd",
+                    compression_level=3,
+                    sorting_columns=sorting_cols,
+                )
+
+                # clean up
+                for f in h5_files:
+                    f.unlink()
+                tmp_path.replace(pq_path)
+
 
         except RuntimeError as e:
             print(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
