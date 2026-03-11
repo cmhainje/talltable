@@ -1,25 +1,55 @@
 import h5py
 import healpy as hp
+import logging
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from astropy.io import fits
 from astropy.wcs import WCS
+from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL
+from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL, PART_MIN_LEVEL
 from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat, byteswap
 from .partition import level_index_to_part
 
 
+logger = logging.getLogger(__name__)
+
 ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
+
+PIXEL_COLUMNS = ["waveid", "flux", "variance", "zodi", "flags", "hphigh", "imageid", "hppart"]
+
+
+@dataclass
+class FITSData:
+    filepath: str
+    image: np.ndarray
+    variance: np.ndarray
+    zodi: np.ndarray
+    flags: np.ndarray
+    header: fits.Header
+
+
+def read_image(filepath):
+    """Read FITS file and return raw data. Pure I/O, safe to call from a thread."""
+    with fits.open(filepath) as hdul:
+        idx = (ALL_ROW, ALL_COL)
+        return FITSData(
+            filepath=filepath,
+            image=hdul["IMAGE"].data[*idx].copy(),
+            variance=hdul["VARIANCE"].data[*idx].copy(),
+            zodi=hdul["ZODI"].data[*idx].copy(),
+            flags=hdul["FLAGS"].data[*idx].copy(),
+            header=hdul["IMAGE"].header.copy(),
+        )
 
 
 class BatchWriter:
-    def __init__(self, chunk_size=16, auto_write=True, task_id=0):
+    def __init__(self, chunk_size=48, auto_write=True, task_id=0):
         self.chunk_size = chunk_size
         self.auto_write = auto_write
         self.task_id = task_id
@@ -37,104 +67,113 @@ class BatchWriter:
             with open(PART_DB_PATH, "r") as f:
                 self.partitions.update(int(p.strip()) for p in f.readlines())
 
-        self.pixel_parts = {}
+        self.pixel_buffer = {k: [] for k in PIXEL_COLUMNS}
 
-    def process_image(self, filepath):
-        pixels = dict()
+    def process_image(self, data):
+        if isinstance(data, str):
+            try:
+                data = read_image(data)
+            except OSError as err:
+                logger.error("error opening %s: %s", data, err)
+                return
 
-        def record(k, v):
-            pixels[k] = v
+        npix = len(ALL_ROW)
 
-        try:
-            with fits.open(filepath) as hdul:
-                idx = (ALL_ROW, ALL_COL)
-                _waveid = ALL_WAVEID
+        det = data.header["DETECTOR"]
+        waveid = ALL_WAVEID + (det << 24)
 
-                det = hdul["IMAGE"].header["DETECTOR"]
-                record("waveid", _waveid + (det << 24))
+        flux = byteswap(data.image).astype(np.float32)
+        variance = byteswap(data.variance).astype(np.float32)
+        zodi = byteswap(data.zodi).astype(np.float32)
+        flags = byteswap(data.flags).astype(np.int32)
 
-                def _numpify(key, dtype=np.float32):
-                    return byteswap(hdul[key].data[*idx]).astype(dtype)
+        wcs = WCS(header=data.header)
+        ra, dec = wcs.all_pix2world(ALL_COL, ALL_ROW, 0)
 
-                record("flux", _numpify("IMAGE"))
-                record("variance", _numpify("VARIANCE"))
-                record("zodi", _numpify("ZODI"))
-                record("flags", _numpify("FLAGS", dtype=np.int32))
+        hphi = hp.ang2pix(2**HP_HIGH_LEVEL, ra, dec, nest=True, lonlat=True)
 
-                # sky position and derived quantities
-                wcs = WCS(header=hdul["IMAGE"].header)
-                ra, dec = wcs.all_pix2world(idx[1], idx[0], 0)
+        max_part = level_index_to_part(
+            PART_MAX_LEVEL, hphi >> (2 * (HP_HIGH_LEVEL - PART_MAX_LEVEL))
+        )
 
-                hphi = hp.ang2pix(2**HP_HIGH_LEVEL, ra, dec, nest=True, lonlat=True)
-                record("hphigh", hphi)
+        # resolve each pixel's partition by walking up the hierarchy
+        hppart = max_part.copy()
+        u_parts, inverse = np.unique(max_part, return_inverse=True)
+        for j, part in enumerate(u_parts):
+            _part = part
+            for _ in range(PART_MAX_LEVEL - PART_MIN_LEVEL):
+                if _part in self.partitions:
+                    break
+                _part = _part >> 2
+            if _part != part:
+                hppart[inverse == j] = _part
 
-                max_part = level_index_to_part(
-                    PART_MAX_LEVEL, hphi >> (2 * (HP_HIGH_LEVEL - PART_MAX_LEVEL))
-                )
-                record("part", max_part)
+        imageid = np.full(npix, data.header["EXPIDN"])
 
-                # image-level stuff
-                t_beg = hdul["IMAGE"].header["MJD-BEG"]
-                t_end = hdul["IMAGE"].header["MJD-END"]
-                obsid = hdul["IMAGE"].header["OBSID"]
-                imageid = hdul["IMAGE"].header["EXPIDN"]
-                record("imageid", np.full(len(idx[0]), imageid))
+        # accumulate into flat buffer
+        self.pixel_buffer["waveid"].append(waveid)
+        self.pixel_buffer["flux"].append(flux)
+        self.pixel_buffer["variance"].append(variance)
+        self.pixel_buffer["zodi"].append(zodi)
+        self.pixel_buffer["flags"].append(flags)
+        self.pixel_buffer["hphigh"].append(hphi)
+        self.pixel_buffer["imageid"].append(imageid)
+        self.pixel_buffer["hppart"].append(hppart)
 
-                self.images["imageid"].append(imageid)
-                self.images["filepath"].append(filepath)
-                self.images["obsid"].append(obsid)
-                self.images["t_beg"].append(t_beg)
-                self.images["t_end"].append(t_end)
+        # accumulate image metadata
+        self.images["imageid"].append(data.header["EXPIDN"])
+        self.images["filepath"].append(data.filepath)
+        self.images["obsid"].append(data.header["OBSID"])
+        self.images["t_beg"].append(data.header["MJD-BEG"])
+        self.images["t_end"].append(data.header["MJD-END"])
 
-                u_parts, inverse = np.unique(pixels["part"], return_inverse=True)
-                for i, part in enumerate(u_parts):
-                    mask = inverse == i
-                    if np.count_nonzero(mask) == 0:  # should not happen
-                        continue
-
-                    _part = part
-                    for i in range(4):
-                        if _part in self.partitions:
-                            break
-                        _part = _part >> 2
-
-                    if _part in self.pixel_parts:
-                        for k, v in pixels.items():
-                            self.pixel_parts[_part][k].append(v[mask])
-                    else:
-                        self.pixel_parts[_part] = {}
-                        for k, v in pixels.items():
-                            self.pixel_parts[_part][k] = [v[mask]]
-
-        except OSError as err:
-            print(f"ERROR OPENING {filepath}, {err}")
-            return
-
-        if self.auto_write:
-            if self.count() >= self.chunk_size:
-                self.write()
+        if self.auto_write and self.count() >= self.chunk_size:
+            self.write()
 
     def count(self):
         return len(self.images["filepath"])
 
     def clear(self):
-        for key in self.images.keys():
+        for key in self.images:
             self.images[key] = []
-        self.pixel_parts = {}
+        self.pixel_buffer = {k: [] for k in PIXEL_COLUMNS}
 
     def _write_pixels(self):
         time = f"{now_simpleformat()}_t{self.task_id}"
 
-        for part, data in self.pixel_parts.items():
-            part_dir = PIXEL_DB_PATH / f"part={part}"
-            part_dir.mkdir(exist_ok=True, parents=True)
+        # concatenate all buffered arrays
+        data = {}
+        for k, arr_list in self.pixel_buffer.items():
+            data[k] = np.concatenate(arr_list)
 
-            path = part_dir / f"chunk_{time}.hdf5"
-            with h5py.File(path, "w") as f:
-                for k, arr_list in data.items():
-                    if k == "part":
-                        continue
-                    f[k] = np.concatenate(arr_list)
+        # sort by hppart so data for the same partition is contiguous
+        sort_idx = np.argsort(data["hppart"], kind="mergesort")
+        for k in data:
+            data[k] = data[k][sort_idx]
+
+        # compute partition boundary indices
+        hppart = data["hppart"]
+        part_ids, part_starts = np.unique(hppart, return_index=True)
+        part_ends = np.empty_like(part_starts)
+        part_ends[:-1] = part_starts[1:]
+        part_ends[-1] = len(hppart)
+
+        # write to a single flat HDF5 file via temp + rename
+        PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
+        tmp_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5.tmp"
+        final_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5"
+
+        with h5py.File(tmp_path, "w") as f:
+            for k, arr in data.items():
+                if k == "hppart":
+                    continue
+                f[k] = arr
+
+            f.attrs["part_ids"] = part_ids
+            f.attrs["part_starts"] = part_starts
+            f.attrs["part_ends"] = part_ends
+
+        tmp_path.rename(final_path)
 
     def _write_images(self):
         IMAGE_PARTS_DIR.mkdir(exist_ok=True)
@@ -144,7 +183,6 @@ class BatchWriter:
             pq.write_table(pa.table(self.images), db_path)
             return
 
-        # @TODO: replace with something row-oriented
         tmp_file = Path(str(db_path) + ".tmp")
         existing_file = pq.ParquetFile(db_path)
         with pq.ParquetWriter(tmp_file, existing_file.schema_arrow) as w:

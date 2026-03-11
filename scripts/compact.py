@@ -46,6 +46,54 @@ def merge_image_parts():
     logging.info(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
 
 
+def scan_chunk_files():
+    """Scan flat HDF5 chunk files and build a partition -> [(file, start, end)] mapping."""
+    h5_files = sorted(PIXEL_DB_PATH.glob("chunk_*.hdf5"))
+    partition_index = {}
+
+    for fpath in h5_files:
+        try:
+            with h5py.File(fpath, "r") as f:
+                part_ids = f.attrs["part_ids"]
+                part_starts = f.attrs["part_starts"]
+                part_ends = f.attrs["part_ends"]
+        except (OSError, KeyError) as e:
+            logging.warning(f"skipping {fpath}: {e}")
+            continue
+
+        for pid, start, end in zip(part_ids, part_starts, part_ends):
+            pid = int(pid)
+            if pid not in partition_index:
+                partition_index[pid] = []
+            partition_index[pid].append((fpath, int(start), int(end)))
+
+    logging.info(f"scanned {len(h5_files)} chunk files, found {len(partition_index)} partitions")
+    return partition_index, h5_files
+
+
+def read_partition_data(sources):
+    """Read a partition's data from flat HDF5 files using contiguous slices."""
+    tables = []
+    for fpath, start, end in sources:
+        data = {}
+        with h5py.File(fpath, "r") as f:
+            for key in f.keys():
+                data[key] = f[key][start:end]
+        try:
+            tables.append(pa.table(data))
+        except pa.lib.ArrowInvalid as e:
+            msg = f"failed to read slice [{start}:{end}] from {fpath}.\n"
+            msg += "data dict included:\n"
+            for key in data:
+                if isinstance(data[key], np.ndarray):
+                    msg += f"{key}: np.array [{data[key].shape}]\n"
+                else:
+                    msg += f"{key}: {data[key]}\n"
+            msg += f"error message:\n{e}"
+            raise RuntimeError(msg)
+    return tables
+
+
 def main():
     logging.info(f"processing index {task_id} of {num_tasks} tasks")
 
@@ -53,64 +101,69 @@ def main():
     if task_id == 0:
         merge_image_parts()
 
-    partitions = {}
+    # scan flat HDF5 chunk files for partition boundaries
+    partition_index, h5_files = scan_chunk_files()
+
+    # also pick up any old-style per-partition HDF5 files (from previous ingests)
     for p in sorted(PIXEL_DB_PATH.glob("part=*/*.hdf5")):
         part = int(p.parts[-2].split("=")[1])
-        if part in partitions:
-            partitions[part].append(p)
-        else:
-            partitions[part] = [p]
+        # use sentinel (start=-1, end=-1) to indicate old-style file
+        if part not in partition_index:
+            partition_index[part] = []
+        partition_index[part].append((p, -1, -1))
 
-    # process only every Nth partition, starting on i
-    keys = list(partitions.keys())
+    keys = sorted(partition_index.keys())
     if num_tasks > 1:
         keys = keys[task_id::num_tasks]
 
     for part in tqdm(keys):
-
-        def _h5_to_table(filepath):
-            data = dict()
-            with h5py.File(filepath, "r") as f:
-                for key in f.keys():
-                    data[key] = np.atleast_1d(f[key][:].squeeze())
-            try:
-                return pa.table(data)
-            except pa.lib.ArrowInvalid as e:
-                msg = f"failed to process h5 file {filepath}.\n"
-                msg += "data dict included:\n"
-                for key in data:
-                    if isinstance(data[key], np.ndarray):
-                        msg += f"{key}: np.array [{data[key].shape}]\n"
-                    else:
-                        msg += f"{key}: {data[key]}\n"
-                msg += f"error message:\n{e}"
-                raise RuntimeError(msg)
-
         try:
             level, index = part_to_level_index(part)
-
-            # read in the HDF5 file(s), smoosh all together
-            h5_files = partitions[part]
-            if len(h5_files) == 0:
+            sources = partition_index[part]
+            if len(sources) == 0:
                 continue
 
-            pq_path = h5_files[0].with_name("compacted.parquet")
-            tmp_path = pq_path.with_name("tmp.parquet")
+            part_dir = PIXEL_DB_PATH / f"part={part}"
+            part_dir.mkdir(exist_ok=True, parents=True)
+            pq_path = part_dir / "compacted.parquet"
+            tmp_path = part_dir / "tmp.parquet"
 
-            tables = [_h5_to_table(f) for f in h5_files]
+            # read data from all sources
+            tables = []
+
+            # flat chunk files (contiguous slices)
+            flat_sources = [(f, s, e) for f, s, e in sources if s >= 0]
+            if flat_sources:
+                tables.extend(read_partition_data(flat_sources))
+
+            # old-style per-partition HDF5 files
+            old_h5_files = [f for f, s, _ in sources if s < 0]
+            for filepath in old_h5_files:
+                data = {}
+                with h5py.File(filepath, "r") as f:
+                    for key in f.keys():
+                        data[key] = np.atleast_1d(f[key][:].squeeze())
+                try:
+                    tables.append(pa.table(data))
+                except pa.lib.ArrowInvalid as e:
+                    msg = f"failed to process h5 file {filepath}.\n"
+                    msg += f"error message:\n{e}"
+                    raise RuntimeError(msg)
+
+            # include existing compacted parquet if present
             if pq_path.exists():
                 try:
                     tables.append(pq.ParquetFile(pq_path).read())
                 except pa.lib.ArrowInvalid as e:
                     msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
                     raise RuntimeError(msg)
+
             table = pa.concat_tables(tables)
 
             # sort
             sort_keys = [("hphigh", "ascending")]
             table = table.sort_by(sort_keys)
             sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
-
 
             # check if its too big
             if len(table) > MAX_ROWS_PER_PART and level < PART_MAX_LEVEL:
@@ -120,7 +173,7 @@ def main():
                     _index = (index << 2) + k
                     _p = level_index_to_part(_level, _index)
                     _part_dir = PIXEL_DB_PATH / f"part={_p}"
-                    _part_dir.mkdir(exist_ok=False)
+                    _part_dir.mkdir(exist_ok=True, parents=True)
 
                     _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
                     _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
@@ -137,15 +190,13 @@ def main():
                         sorting_columns=sorting_cols,
                     )
 
-                # @TODO: store the full list of partitions somewhere, update it here
-
-                # clean up
-                for f in h5_files:
-                    f.unlink()
-                pq_path.unlink()
-                pq_path.parent.rmdir()
-
-
+                # clean up old per-partition HDF5 files
+                for filepath in old_h5_files:
+                    filepath.unlink()
+                if pq_path.exists():
+                    pq_path.unlink()
+                if part_dir.exists() and not any(part_dir.iterdir()):
+                    part_dir.rmdir()
 
             else:
                 pq.write_table(
@@ -156,17 +207,23 @@ def main():
                     sorting_columns=sorting_cols,
                 )
 
-                # clean up
-                for f in h5_files:
-                    f.unlink()
+                # clean up old per-partition HDF5 files
+                for filepath in old_h5_files:
+                    filepath.unlink()
                 tmp_path.replace(pq_path)
-
 
         except RuntimeError as e:
             logging.warning(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
 
         for handler in logger.handlers:
             handler.flush()
+
+    # flat chunk HDF5 files can be deleted after all tasks complete
+    if h5_files:
+        logging.info(
+            f"compact done. to clean up {len(h5_files)} flat chunk files, run:\n"
+            f"  rm {PIXEL_DB_PATH}/chunk_*.hdf5"
+        )
 
 
 if __name__ == "__main__":
