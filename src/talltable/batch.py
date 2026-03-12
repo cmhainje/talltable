@@ -122,14 +122,14 @@ class BatchWriter:
         # resolve each pixel's partition by walking up the hierarchy
         part = max_part.copy()
         u_parts, inverse = np.unique(max_part, return_inverse=True)
-        for j, part in enumerate(u_parts):
-            _part = part
+        for j, _max_part in enumerate(u_parts):
+            _real_part = _max_part
             for _ in range(PART_MAX_LEVEL - PART_MIN_LEVEL):
-                if _part in self.partitions:
+                if _real_part in self.partitions:
                     break
-                _part = _part >> 2
-            if _part != part:
-                part[inverse == j] = _part
+                _real_part = _real_part >> 2
+            if _real_part != _max_part:
+                part[inverse == j] = _real_part
 
         imageid = np.full(NPIX, data.header["EXPIDN"])
 
