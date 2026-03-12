@@ -35,7 +35,7 @@ out_file = os.environ.get("SLURM_JOB_STDOUT", f"./slurm-{job_id}.out")
 def parse():
     ap = ArgumentParser()
     ap.add_argument("infile")
-    ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=48)
+    ap.add_argument("-C", "--chunk-size", type=int, nargs="?", default=32)
     ap.add_argument("-F", "--force", action="store_true", help="force (re-ingest)")
     return ap.parse_args()
 

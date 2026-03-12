@@ -58,7 +58,7 @@ def read_image(filepath):
 
 
 class BatchWriter:
-    def __init__(self, chunk_size=48, auto_write=True, task_id=0):
+    def __init__(self, chunk_size=32, auto_write=True, task_id=0):
         self.chunk_size = chunk_size
         self.auto_write = auto_write
         self.task_id = task_id
