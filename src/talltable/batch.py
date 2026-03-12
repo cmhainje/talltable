@@ -28,9 +28,20 @@ from .partition import level_index_to_part
 
 logger = logging.getLogger(__name__)
 
+NPIX = len(ALL_ROW)
 ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
 
-PIXEL_COLUMNS = ["waveid", "flux", "variance", "zodi", "flags", "hphigh", "imageid", "hppart"]
+PIXEL_DTYPES = {
+    "waveid": np.int32,
+    "flux": np.float32,
+    "variance": np.float32,
+    "zodi": np.float32,
+    "flags": np.int32,
+    "hphigh": np.int64,
+    "imageid": np.int64,
+    "part": np.int32,
+}
+PIXEL_COLUMNS = list(PIXEL_DTYPES.keys())
 
 
 @dataclass
@@ -76,7 +87,12 @@ class BatchWriter:
             with open(PART_DB_PATH, "r") as f:
                 self.partitions.update(int(p.strip()) for p in f.readlines())
 
-        self.pixel_buffer = {k: [] for k in PIXEL_COLUMNS}
+        # pre-allocate pixel buffer: one flat array per column, reused across chunks
+        self._pixel_buf = {
+            k: np.empty(chunk_size * NPIX, dtype=dt)
+            for k, dt in PIXEL_DTYPES.items()
+        }
+        self._buf_pos = 0  # number of images currently buffered
 
     def process_image(self, data):
         if isinstance(data, str):
@@ -85,8 +101,6 @@ class BatchWriter:
             except OSError as err:
                 logger.error("error opening %s: %s", data, err)
                 return
-
-        npix = len(ALL_ROW)
 
         det = data.header["DETECTOR"]
         waveid = ALL_WAVEID + (det << 24)
@@ -106,7 +120,7 @@ class BatchWriter:
         )
 
         # resolve each pixel's partition by walking up the hierarchy
-        hppart = max_part.copy()
+        part = max_part.copy()
         u_parts, inverse = np.unique(max_part, return_inverse=True)
         for j, part in enumerate(u_parts):
             _part = part
@@ -115,19 +129,22 @@ class BatchWriter:
                     break
                 _part = _part >> 2
             if _part != part:
-                hppart[inverse == j] = _part
+                part[inverse == j] = _part
 
-        imageid = np.full(npix, data.header["EXPIDN"])
+        imageid = np.full(NPIX, data.header["EXPIDN"])
 
-        # accumulate into flat buffer
-        self.pixel_buffer["waveid"].append(waveid)
-        self.pixel_buffer["flux"].append(flux)
-        self.pixel_buffer["variance"].append(variance)
-        self.pixel_buffer["zodi"].append(zodi)
-        self.pixel_buffer["flags"].append(flags)
-        self.pixel_buffer["hphigh"].append(hphi)
-        self.pixel_buffer["imageid"].append(imageid)
-        self.pixel_buffer["hppart"].append(hppart)
+        # write into pre-allocated buffer at current offset
+        i = self._buf_pos
+        sl = slice(i * NPIX, (i + 1) * NPIX)
+        self._pixel_buf["waveid"][sl] = waveid
+        self._pixel_buf["flux"][sl] = flux
+        self._pixel_buf["variance"][sl] = variance
+        self._pixel_buf["zodi"][sl] = zodi
+        self._pixel_buf["flags"][sl] = flags
+        self._pixel_buf["hphigh"][sl] = hphi
+        self._pixel_buf["imageid"][sl] = imageid
+        self._pixel_buf["part"][sl] = part
+        self._buf_pos += 1
 
         # accumulate image metadata
         self.images["imageid"].append(data.header["EXPIDN"])
@@ -145,22 +162,23 @@ class BatchWriter:
     def clear(self):
         for key in self.images:
             self.images[key] = []
-        self.pixel_buffer = {k: [] for k in PIXEL_COLUMNS}
+        self._buf_pos = 0
 
     def _write_pixels(self):
         time = f"{now_simpleformat()}_t{self.task_id}"
+        n = self._buf_pos * NPIX
 
-        # compute sort order from hppart, then free hppart buffer
-        hppart = np.concatenate(self.pixel_buffer.pop("hppart"))
-        sort_idx = np.argsort(hppart, kind="mergesort")
-        hppart = hppart[sort_idx]
+        # sort order from part (view into pre-allocated buffer, no copy)
+        part = self._pixel_buf["part"][:n]
+        sort_idx = np.argsort(part, kind="mergesort")
+        sorted_part = part[sort_idx]
 
         # compute partition boundary indices
-        part_ids, part_starts = np.unique(hppart, return_index=True)
+        part_ids, part_starts = np.unique(sorted_part, return_index=True)
         part_ends = np.empty_like(part_starts)
         part_ends[:-1] = part_starts[1:]
-        part_ends[-1] = len(hppart)
-        del hppart
+        part_ends[-1] = n
+        del sorted_part
 
         # write to a single flat HDF5 file via temp + rename
         PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
@@ -168,11 +186,10 @@ class BatchWriter:
         final_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5"
 
         with h5py.File(tmp_path, "w") as f:
-            # pop each column from the buffer so memory is freed as we go
-            for k in list(self.pixel_buffer.keys()):
-                concat = np.concatenate(self.pixel_buffer.pop(k))
-                f[k] = concat[sort_idx]
-                del concat
+            for k in PIXEL_COLUMNS:
+                if k == "part":
+                    continue
+                f[k] = self._pixel_buf[k][:n][sort_idx]
 
             f.attrs["part_ids"] = part_ids
             f.attrs["part_starts"] = part_starts
