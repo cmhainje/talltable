@@ -141,22 +141,18 @@ class BatchWriter:
     def _write_pixels(self):
         time = f"{now_simpleformat()}_t{self.task_id}"
 
-        # concatenate all buffered arrays
-        data = {}
-        for k, arr_list in self.pixel_buffer.items():
-            data[k] = np.concatenate(arr_list)
-
-        # sort by hppart so data for the same partition is contiguous
-        sort_idx = np.argsort(data["hppart"], kind="mergesort")
-        for k in data:
-            data[k] = data[k][sort_idx]
+        # concatenate hppart first to compute sort order, then free the buffer
+        # so we don't hold two full copies of the data simultaneously
+        hppart = np.concatenate(self.pixel_buffer["hppart"])
+        sort_idx = np.argsort(hppart, kind="mergesort")
+        hppart = hppart[sort_idx]
 
         # compute partition boundary indices
-        hppart = data["hppart"]
         part_ids, part_starts = np.unique(hppart, return_index=True)
         part_ends = np.empty_like(part_starts)
         part_ends[:-1] = part_starts[1:]
         part_ends[-1] = len(hppart)
+        del hppart
 
         # write to a single flat HDF5 file via temp + rename
         PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
@@ -164,15 +160,19 @@ class BatchWriter:
         final_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5"
 
         with h5py.File(tmp_path, "w") as f:
-            for k, arr in data.items():
+            # write each column one at a time: concat, sort, write, free
+            for k, arr_list in self.pixel_buffer.items():
                 if k == "hppart":
                     continue
+                arr = np.concatenate(arr_list)[sort_idx]
                 f[k] = arr
+                del arr
 
             f.attrs["part_ids"] = part_ids
             f.attrs["part_starts"] = part_starts
             f.attrs["part_ends"] = part_ends
 
+        del sort_idx
         tmp_path.rename(final_path)
 
     def _write_images(self):
