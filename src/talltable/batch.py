@@ -69,7 +69,7 @@ def read_image(filepath):
 
 
 class BatchWriter:
-    def __init__(self, chunk_size=32, auto_write=True, task_id=0):
+    def __init__(self, chunk_size=24, auto_write=True, task_id=0):
         self.chunk_size = chunk_size
         self.auto_write = auto_write
         self.task_id = task_id
@@ -87,11 +87,18 @@ class BatchWriter:
             with open(PART_DB_PATH, "r") as f:
                 self.partitions.update(int(p.strip()) for p in f.readlines())
 
-        # pre-allocate pixel buffer: one flat array per column, reused across chunks
+        # pre-allocate pixel buffer and write scratch space
+        # both are reused across chunks — no alloc/free churn
+        total = chunk_size * NPIX
         self._pixel_buf = {
-            k: np.empty(chunk_size * NPIX, dtype=dt)
+            k: np.empty(total, dtype=dt)
             for k, dt in PIXEL_DTYPES.items()
         }
+        self._write_buf = {
+            k: np.empty(total, dtype=dt)
+            for k, dt in PIXEL_DTYPES.items()
+        }
+        self._sort_idx = np.empty(total, dtype=np.intp)
         self._buf_pos = 0  # number of images currently buffered
 
     def process_image(self, data):
@@ -168,17 +175,21 @@ class BatchWriter:
         time = f"{now_simpleformat()}_t{self.task_id}"
         n = self._buf_pos * NPIX
 
-        # sort order from part (view into pre-allocated buffer, no copy)
-        part = self._pixel_buf["part"][:n]
-        sort_idx = np.argsort(part, kind="mergesort")
-        sorted_part = part[sort_idx]
+        # compute sort order into pre-allocated sort_idx
+        # argsort unavoidably allocates a temporary, but it's freed immediately
+        tmp_idx = np.argsort(self._pixel_buf["part"][:n], kind="mergesort")
+        self._sort_idx[:n] = tmp_idx
+        del tmp_idx
+        sort_idx = self._sort_idx[:n]
 
-        # compute partition boundary indices
+        # sort part into write buffer to compute boundaries
+        np.take(self._pixel_buf["part"], sort_idx, out=self._write_buf["part"][:n])
+        sorted_part = self._write_buf["part"][:n]
+
         part_ids, part_starts = np.unique(sorted_part, return_index=True)
         part_ends = np.empty_like(part_starts)
         part_ends[:-1] = part_starts[1:]
         part_ends[-1] = n
-        del sorted_part
 
         # write to a single flat HDF5 file via temp + rename
         PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
@@ -189,13 +200,13 @@ class BatchWriter:
             for k in PIXEL_COLUMNS:
                 if k == "part":
                     continue
-                f[k] = self._pixel_buf[k][:n][sort_idx]
+                np.take(self._pixel_buf[k], sort_idx, out=self._write_buf[k][:n])
+                f[k] = self._write_buf[k][:n]
 
             f.attrs["part_ids"] = part_ids
             f.attrs["part_starts"] = part_starts
             f.attrs["part_ends"] = part_ends
 
-        del sort_idx
         tmp_path.rename(final_path)
 
     def _write_images(self):
