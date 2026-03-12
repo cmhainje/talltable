@@ -219,11 +219,11 @@ def main():
             handler.flush()
 
     # flat chunk HDF5 files can be deleted after all tasks complete
-    if h5_files:
-        logging.info(
-            f"compact done. to clean up {len(h5_files)} flat chunk files, run:\n"
-            f"  rm {PIXEL_DB_PATH}/chunk_*.hdf5"
-        )
+    # if h5_files:
+    #     logging.info(
+    #         f"compact done. to clean up {len(h5_files)} flat chunk files, run:\n"
+    #         f"  rm {PIXEL_DB_PATH}/chunk_*.hdf5"
+    #     )
 
 
 if __name__ == "__main__":
