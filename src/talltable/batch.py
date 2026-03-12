@@ -1,3 +1,4 @@
+import ctypes
 import h5py
 import healpy as hp
 import logging
@@ -9,6 +10,14 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _malloc_trim():
+        _libc.malloc_trim(0)
+except OSError:
+    def _malloc_trim():
+        pass
 
 from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL, PART_MIN_LEVEL
 from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
@@ -141,9 +150,8 @@ class BatchWriter:
     def _write_pixels(self):
         time = f"{now_simpleformat()}_t{self.task_id}"
 
-        # concatenate hppart first to compute sort order, then free the buffer
-        # so we don't hold two full copies of the data simultaneously
-        hppart = np.concatenate(self.pixel_buffer["hppart"])
+        # compute sort order from hppart, then free hppart buffer
+        hppart = np.concatenate(self.pixel_buffer.pop("hppart"))
         sort_idx = np.argsort(hppart, kind="mergesort")
         hppart = hppart[sort_idx]
 
@@ -160,13 +168,11 @@ class BatchWriter:
         final_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5"
 
         with h5py.File(tmp_path, "w") as f:
-            # write each column one at a time: concat, sort, write, free
-            for k, arr_list in self.pixel_buffer.items():
-                if k == "hppart":
-                    continue
-                arr = np.concatenate(arr_list)[sort_idx]
-                f[k] = arr
-                del arr
+            # pop each column from the buffer so memory is freed as we go
+            for k in list(self.pixel_buffer.keys()):
+                concat = np.concatenate(self.pixel_buffer.pop(k))
+                f[k] = concat[sort_idx]
+                del concat
 
             f.attrs["part_ids"] = part_ids
             f.attrs["part_starts"] = part_starts
@@ -196,3 +202,4 @@ class BatchWriter:
             self._write_pixels()
             self._write_images()
             self.clear()
+            _malloc_trim()
