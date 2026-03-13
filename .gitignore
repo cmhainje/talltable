@@ -2,7 +2,9 @@
 **/.ipynb_checkpoints/
 **/__pycache__
 **/*.out
+**/*.txt
 
 db/
 data/
-**/*.txt
+docs-dist/
+
