@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="$lang$" xml:lang="$lang$"$if(dir)$ dir="$dir$"$endif$>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+        <title>$pagetitle$</title>
+        <link rel="stylesheet" href="styles.css" />
+        <link rel="preconnect" href="https://rsms.me/">
+        <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;1,100;1,200;1,300;1,400;1,500;1,600;1,700&display=swap" rel="stylesheet">
+        $for(css)$
+        <link rel="stylesheet" href="$css$" />
+        $endfor$
+        $for(header-includes)$
+        $header-includes$
+        $endfor$
+        $if(math)$
+        $math$
+        $endif$
+    </head>
+    <body>
+        $for(include-before)$
+        $include-before$
+        $endfor$
+
+        <main>
+            <article>
+                $if(title)$
+                <header id="title-block-header">
+                    <h1 class="title">$title$</h1>
+                    $if(subtitle)$
+                    <p class="subtitle">$subtitle$</p>
+                    $endif$
+                </header>
+                $endif$
+
+                $if(toc)$
+                <nav id="$idprefix$TOC" role="doc-toc">
+                    $if(toc-title)$
+                    <h2 id="$idprefix$toc-title">$toc-title$</h2>
+                    $endif$
+                    $table-of-contents$
+                </nav>
+                $endif$
+
+
+                $body$
+            </article>
+        </main>
+
+        $for(include-after)$
+        $include-after$
+        $endfor$
+    </body>
+</html>
