@@ -1,0 +1,26 @@
+name: Build Docs
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pandoc
+        run: sudo apt-get install -y pandoc
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build HTML
+        run: uv run --only-group docs python docs/build.py
+
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs-dist
