@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+
+<html lang="" xml:lang="" xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0, user-scalable=yes" name="viewport"/>
+<title>SPHEREx talltable documentation</title>
+<link href="styles.css" rel="stylesheet"/>
+<link href="https://rsms.me/" rel="preconnect"/>
+<link href="https://rsms.me/inter/inter.css" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,100;0,200;0,300;0,400;0,500;0,600;0,700;1,100;1,200;1,300;1,400;1,500;1,600;1,700&amp;display=swap" rel="stylesheet"/>
+</head>
+<body>
+<main>
+<article>
+<header id="title-block-header">
+<h1 class="title">SPHEREx talltable
+documentation</h1>
+</header>
+<nav id="TOC" role="doc-toc">
+<ul>
+<li><a href="#authors" id="toc-authors">Authors</a></li>
+<li><a href="#installation" id="toc-installation">Installation</a></li>
+<li><a href="#schema" id="toc-schema">Schema</a>
+<ul>
+<li><a href="#waves" id="toc-waves">Waves</a></li>
+<li><a href="#images" id="toc-images">Images</a></li>
+<li><a href="#pixels" id="toc-pixels">Pixels</a></li>
+<li><a href="#partitions" id="toc-partitions">Partitions</a></li>
+</ul></li>
+<li><a href="#building-the-database" id="toc-building-the-database">Building
+                                        the database</a>
+<ul>
+<li><a href="#configure-paths" id="toc-configure-paths">Configure
+                                        paths</a></li>
+<li><a href="#build-the-waves-table" id="toc-build-the-waves-table">Build
+                                        the waves table</a></li>
+<li><a href="#ingest" id="toc-ingest">Ingest</a></li>
+</ul></li>
+</ul>
+</nav>
+<details open="True"><summary><h1 id="authors">Authors</h1></summary><p>This database and associated package are authored
+                by</p><ul>
+<li><strong>Connor Hainje</strong>, NYU</li>
+<li><strong>David W Hogg</strong>, NYU+</li>
+</ul><p>Contact email:
+                <code>connor &lt;dot&gt; hainje &lt;at&gt; nyu &lt;dot&gt; edu</code></p></details>
+
+
+
+<details open="True"><summary><h1 id="installation">Installation</h1></summary><p>The project can be installed by</p><pre><code>git clone https://github.com/cmhainje/talltable.git</code></pre><p>Inside, there is a Python package,
+                <code>talltable</code>, which handles building and
+                querying the database. Install it from inside the
+                project with</p><pre><code>uv sync</code></pre><p>To test that it installed correctly,</p><pre><code>$ uv run python -c "import talltable; print(talltable)"
+&lt;module 'talltable' from '/path/to/talltable/src/talltable/__init__.py'&gt;</code></pre></details>
+
+
+
+
+
+
+<details open="True"><summary><h1 id="schema">Schema</h1></summary><details open="True"><summary><h2 id="waves">Waves</h2></summary><p>The <strong>waves</strong> table stores the
+                wavelength information. Its filename is
+                <code>waves.parquet</code>. The data comes from the most
+                recent <code>spectral_wcs</code> data released by
+                SPHEREx. The table schema is</p><pre><code>waves: {
+    waveid:     int
+    wavelength: float
+    bandwidth:  float
+}</code></pre><p><code>waveid</code> is an integer that bit-packs the
+                detector number (from 1 to 6) and the row and column
+                (from 0 to 2039) of a pixel in its source image. We
+                provide utilities in the <code>talltable</code> package
+                for translating between <code>waveid</code> and
+                detector, row, column.</p><div class="sourceCode" id="cb5"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a aria-hidden="true" href="#cb5-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.waveid <span class="im">import</span> rowcoldet_to_waveid, waveid_to_rowcoldet</span>
+<span id="cb5-2"><a aria-hidden="true" href="#cb5-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> rowcoldet_to_waveid(<span class="dv">479</span>, <span class="dv">1831</span>, <span class="dv">3</span>)</span>
+<span id="cb5-3"><a aria-hidden="true" href="#cb5-3" tabindex="-1"></a><span class="dv">52295463</span></span>
+<span id="cb5-4"><a aria-hidden="true" href="#cb5-4" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> waveid_to_rowcoldet(<span class="dv">52295463</span>)</span>
+<span id="cb5-5"><a aria-hidden="true" href="#cb5-5" tabindex="-1"></a>(<span class="dv">479</span>, <span class="dv">1831</span>, <span class="dv">3</span>)</span></code></pre></div></details><details open="True"><summary><h2 id="images">Images</h2></summary><p>The <strong>images</strong> table stores image
+                metadata. Its filename is <code>images.parquet</code>.
+                The table schema is</p><pre><code>images: {
+    imageid:  int
+    filepath: str
+    @TODO
+}</code></pre></details><details open="True"><summary><h2 id="pixels">Pixels</h2></summary><p>The meat of the database — the namesake “tall table”
+                — is the <strong>pixels</strong> table. This database is
+                split over many files with filepaths like
+                <code>pixels/part=${part}/compacted.parquet</code>. The
+                table schema is, roughly</p><pre><code>pixels: {
+    hphigh:   int64
+    flux:     float32
+    zodi:     float32
+    variance: float32
+    flags:    int32
+    waveid:   int32
+    imageid:  int64
+    part:     int32
+}</code></pre><p>Details about each column are as follows:</p><ul>
+<li><code>hphigh</code> : a very level 22 HEALPix index
+                giving the position on sky of the pixel.</li>
+<li><code>flux</code>: the value of this pixel in the
+                <code>"IMAGE"</code> layer of the spectral image file.
+                Units: MJy/sr.</li>
+<li><code>zodi</code>: the value of this pixel in the
+                <code>"ZODI"</code> layer of the spectral image file.
+                Units: MJy/sr.</li>
+<li><code>variance</code>: the value of this pixel in
+                the <code>"VARIANCE"</code> layer of the spectral image
+                file. Units: (MJy/sr)<span class="math inline"><sup>2</sup></span>.</li>
+<li><code>flags</code>: the value of this pixel in the
+                <code>"FLAGS"</code> layer of the spectral image
+                file.</li>
+<li><code>waveid</code>: a foreign key referencing the
+                <a href="/#waves">waves table</a>. It encodes the
+                detector, row, and column of this pixel.</li>
+<li><code>imageid</code>: a foreign key referencing the
+                <a href="/#images">images table</a>. It is the exposure
+                ID number (<code>EXPIDN</code>) from the spectral image
+                header.</li>
+<li><code>part</code>: the partition number, encoding a
+                much coarser HEALPix index for this pixel’s location on
+                sky. Note that this column is encoded in the
+                <em>filepath</em> of the partition, so the Parquet file
+                itself will not contain a column <code>part</code>. More
+                details <a href="/#partitions">below</a>.</li>
+</ul></details><details open="True"><summary><h2 id="partitions">Partitions</h2></summary><p>For our partitioning scheme, we use HEALPix indices.
+                These start at level 6 (<span class="math inline"><em>N</em><em>s</em><em>i</em><em>d</em><em>e</em> = 2<sup>6</sup></span>).
+                We set the maximum number of rows per partition to 200
+                million. If a partition tries to exceed this number of
+                rows, we subdivide it to the next HEALPix level, up to
+                level 10.</p><p>The partition number packs both the HEALPix level and
+                the pixel index into one 32-bit unsigned integer. Note
+                that HEALPix level <span class="math inline"><em>n</em></span> has <span class="math inline">12 × 4<sup><em>n</em></sup></span>
+                pixels, therefore requiring <span class="math inline">2 (<em>n</em>+2)</span> bits. In the
+                overhead, then, we can set a bit to encode the level. We
+                choose to set bit <span class="math inline">2 (<em>n</em>+4) + 1</span>: that’s
+                bit 29 for level 10, bit 21 for level 6.</p><p>In the nested ordering scheme, HEALPix indices can be
+                downgraded by bitshifting right twice. Notice how our
+                level-encoding bit also shifts right twice when
+                downgraded. Thus, this property applies to our partition
+                numbers as well!</p><pre><code>level 10: 0b 0001 0000 xxxx xxxx xxxx xxxx xxxx xxxx
+level 9:  0b 0000 0100 00xx xxxx xxxx xxxx xxxx xxxx
+level 8:  0b 0000 0001 0000 xxxx xxxx xxxx xxxx xxxx
+level 7:  0b 0000 0000 0100 00xx xxxx xxxx xxxx xxxx
+level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code>talltable</code> package, we provide
+                simple utitlity functions for translating between
+                <code>part</code> and <code>(level, index)</code>.</p><div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a aria-hidden="true" href="#cb9-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.partition <span class="im">import</span> level_index_to_part, part_to_level_index</span>
+<span id="cb9-2"><a aria-hidden="true" href="#cb9-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> level_index_to_part(<span class="dv">6</span>, <span class="dv">12345</span>)</span>
+<span id="cb9-3"><a aria-hidden="true" href="#cb9-3" tabindex="-1"></a><span class="dv">1060921</span></span>
+<span id="cb9-4"><a aria-hidden="true" href="#cb9-4" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> part_to_level_index(<span class="dv">1060921</span>)</span>
+<span id="cb9-5"><a aria-hidden="true" href="#cb9-5" tabindex="-1"></a>(<span class="dv">6</span>, <span class="dv">12345</span>)</span></code></pre></div><p>We also provide a utility for finding the partition
+                in the database which contains a point on sky (expects
+                RA/Dec in degrees).</p><div class="sourceCode" id="cb10"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb10-1"><a aria-hidden="true" href="#cb10-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.partition <span class="im">import</span> find_partition</span>
+<span id="cb10-2"><a aria-hidden="true" href="#cb10-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> find_partition(<span class="dv">350</span>, <span class="dv">5</span>)</span>
+<span id="cb10-3"><a aria-hidden="true" href="#cb10-3" tabindex="-1"></a><span class="at">@TODO</span>: output</span></code></pre></div><p>For larger queries, sometimes it can be useful to
+                know all the partitions that have been created and at
+                what levels. We store this information in
+                <code>partitions.txt</code>, which contains all the
+                partition numbers separated by newlines.</p></details></details>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<details open="True"><summary><h1 id="building-the-database">Building the
+                database</h1></summary><p>Building the database proceeds in a few stages.</p><p><strong>Note:</strong> If you have access to the
+                Popeye cluster, you can use my built version! The files
+                are located at
+                <code>/mnt/sdceph/users/chainje/spxdb</code>.</p><p>The stages are</p><ol start="0" type="1">
+<li>Configure paths to the source data and the
+                database</li>
+<li>Build the <code>waves</code> table</li>
+<li>Ingest a batch</li>
+<li>Compactify</li>
+<li>Post-compaction clean-up</li>
+<li>GOTO 2</li>
+</ol><details open="True"><summary><h2 id="configure-paths">Configure paths</h2></summary><p>Do you have all the SPHEREx data on disk somewhere
+                locally? If so, set the path in
+                <code>talltable/paths.py</code>:</p><div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a aria-hidden="true" href="#cb11-1" tabindex="-1"></a>DATA_DIR <span class="op">=</span> Path(<span class="st">'/path/to/level2/'</span>)</span></code></pre></div><p>Otherwise, we recommend streaming the data from
+                S3.</p><div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a aria-hidden="true" href="#cb12-1" tabindex="-1"></a><span class="at">@TODO</span></span></code></pre></div><p>Also, choose a location for the database to live.</p><div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a aria-hidden="true" href="#cb13-1" tabindex="-1"></a>DB_DIR <span class="op">=</span> Path(<span class="st">'/path/to/spxdb'</span>)</span></code></pre></div></details><details open="True"><summary><h2 id="build-the-waves-table">Build the waves
+                table</h2></summary><p>The <code>waves</code> table can be built very
+                simply:</p><pre><code>uv run python scripts/build_wave.py</code></pre></details><details open="True"><summary><h2 id="ingest">Ingest</h2></summary><p>To ingest spectral images into the database, we first
+                need to identify a batch of files. Typically, we ingest
+                images in a batch of one week of released data, in which
+                case the list of files can be found with something
+                like</p><div class="sourceCode" id="cb15"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb15-1"><a aria-hidden="true" href="#cb15-1" tabindex="-1"></a><span class="fu">find</span> /path/to/level2/ <span class="at">-mindepth</span> 4 <span class="at">-maxdepth</span> 4 <span class="at">-name</span> <span class="st">"*2025W19*"</span> <span class="op">&gt;</span> batch.txt</span></code></pre></div><p>Or, if you’re using S3,</p><pre><code>@TODO</code></pre><p>Now, because Parquet (our final file format) is
+                column-oriented, adding new rows is hard. As such,
+                ingestion proceeds in two stages. First, we loop over
+                all the spectral images, doing our processing and
+                sorting the pixels into the relevant partitions. This
+                happens in the script <code>ingest.py</code>.</p><pre><code>uv run python scripts/ingest.py batch.txt</code></pre><p>This produces a bunch of small HDF5 files in the
+                <code>pixels</code> directory.</p><p>Next, we loop over all the chunks, grouping together
+                pixels from the same partition and writing them
+                altogether into one Parquet file. This happens in the
+                script <code>compact.py</code>.</p><pre><code>uv run python scripts/compact.py</code></pre><p>We also have a script that builds a file,
+                <code>parts.txt</code>, with all the known partition
+                numbers in it. It should be run after every compaction,
+                as it is needed for the ingestion step.</p><pre><code>uv run python scripts/build_parts.py</code></pre><p>This script also cleans up the leftover HDF5
+                files.</p><p>Note that these scripts are set up to parallelize
+                work over SLURM tasks. It is as easy as using an SLURM
+                submission script like</p><pre><code>#SBATCH --nodes 1
+#SBATCH --ntasks-per-node 16
+#SBATCH --cpus-per-tasks 1
+
+srun uv run python scripts/ingest.py batch.txt
+srun uv run python scripts/compact.py</code></pre><p>Note: don’t run <code>build_parts.py</code> or
+                <code>build_wave.py</code> with <code>srun</code>,
+                because the different tasks will fight each other. See
+                our <a href="https://github.com/cmhainje/talltable/blob/main/slurm/week.sbatch">one-week
+                SLURM script</a> for an example that goes
+                end-to-end.</p></details></details>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</article>
+</main>
+</body>
+</html>
