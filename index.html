@@ -215,7 +215,7 @@ level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code
                 script <code>compact.py</code>.</p><pre><code>uv run python scripts/compact.py</code></pre><p>We also have a script that builds a file,
                 <code>parts.txt</code>, with all the known partition
                 numbers in it. It should be run after every compaction,
-                as it is needed for the ingestion step.</p><pre><code>uv run python scripts/build_parts.py</code></pre><p>This script also cleans up the leftover HDF5
+                as it is needed for the ingestion step.</p><pre><code>uv run python scripts/post_compact.py</code></pre><p>This script also cleans up the leftover HDF5
                 files.</p><p>Note that these scripts are set up to parallelize
                 work over SLURM tasks. It is as easy as using an SLURM
                 submission script like</p><pre><code>#SBATCH --nodes 1
@@ -223,8 +223,8 @@ level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code
 #SBATCH --cpus-per-tasks 1
 
 srun uv run python scripts/ingest.py batch.txt
-srun uv run python scripts/compact.py</code></pre><p>Note: don’t run <code>build_parts.py</code> or
-                <code>build_waves.py</code> with <code>srun</code>,
+srun uv run python scripts/compact.py</code></pre><p>Note: don’t run <code>build_waves.py</code> or
+                <code>post_compact.py</code> with <code>srun</code>,
                 because the different tasks will fight each other. See
                 our <a href="https://github.com/cmhainje/talltable/blob/main/slurm/week.sbatch">one-week
                 SLURM script</a> for an example that goes
