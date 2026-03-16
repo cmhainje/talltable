@@ -200,7 +200,7 @@ DB_DIR = Path('/path/to/spxdb')
 The `waves` table can be built very simply:
 
 ```
-uv run python scripts/build_wave.py
+uv run python scripts/build_waves.py
 ```
 
 
@@ -260,7 +260,7 @@ srun uv run python scripts/ingest.py batch.txt
 srun uv run python scripts/compact.py
 ```
 
-Note: don't run `build_parts.py` or `build_wave.py` with `srun`, because the different tasks will fight each other.
+Note: don't run `build_parts.py` or `build_waves.py` with `srun`, because the different tasks will fight each other.
 See our [one-week SLURM script](https://github.com/cmhainje/talltable/blob/main/slurm/week.sbatch) for an example that goes end-to-end.
 
 

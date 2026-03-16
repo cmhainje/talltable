@@ -16,7 +16,7 @@ module load uv
 cd /mnt/home/chainje/spxperiments/scripts
 
 if [ ! -f "/mnt/sdceph/users/chainje/spxdb-test/waves.parquet" ]; then
-    uv run python build_wave.py
+    uv run python build_waves.py
 fi
 
 if [ ! -f "$FILE" ]; then
