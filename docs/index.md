@@ -242,7 +242,7 @@ We also have a script that builds a file, `parts.txt`, with all the known partit
 It should be run after every compaction, as it is needed for the ingestion step.
 
 ```
-uv run python scripts/build_parts.py
+uv run python scripts/post_compact.py
 ```
 
 This script also cleans up the leftover HDF5 files.
@@ -260,7 +260,7 @@ srun uv run python scripts/ingest.py batch.txt
 srun uv run python scripts/compact.py
 ```
 
-Note: don't run `build_parts.py` or `build_waves.py` with `srun`, because the different tasks will fight each other.
+Note: don't run `build_waves.py` or `post_compact.py` with `srun`, because the different tasks will fight each other.
 See our [one-week SLURM script](https://github.com/cmhainje/talltable/blob/main/slurm/week.sbatch) for an example that goes end-to-end.
 
 

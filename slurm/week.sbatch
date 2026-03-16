@@ -29,4 +29,4 @@ echo "found $(cat $FILE | wc -l) files"
 
 srun uv run python ingest.py $FILE
 srun uv run python compact.py
-uv run python build_parts.py
+uv run python post_compact.py
