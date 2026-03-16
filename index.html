@@ -199,7 +199,7 @@ level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code
                 <code>talltable/paths.py</code>:</p><div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a aria-hidden="true" href="#cb11-1" tabindex="-1"></a>DATA_DIR <span class="op">=</span> Path(<span class="st">'/path/to/level2/'</span>)</span></code></pre></div><p>Otherwise, we recommend streaming the data from
                 S3.</p><div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a aria-hidden="true" href="#cb12-1" tabindex="-1"></a><span class="at">@TODO</span></span></code></pre></div><p>Also, choose a location for the database to live.</p><div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a aria-hidden="true" href="#cb13-1" tabindex="-1"></a>DB_DIR <span class="op">=</span> Path(<span class="st">'/path/to/spxdb'</span>)</span></code></pre></div></details><details open="True"><summary><h2 id="build-the-waves-table">Build the waves
                 table</h2></summary><p>The <code>waves</code> table can be built very
-                simply:</p><pre><code>uv run python scripts/build_wave.py</code></pre></details><details open="True"><summary><h2 id="ingest">Ingest</h2></summary><p>To ingest spectral images into the database, we first
+                simply:</p><pre><code>uv run python scripts/build_waves.py</code></pre></details><details open="True"><summary><h2 id="ingest">Ingest</h2></summary><p>To ingest spectral images into the database, we first
                 need to identify a batch of files. Typically, we ingest
                 images in a batch of one week of released data, in which
                 case the list of files can be found with something
@@ -224,7 +224,7 @@ level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code
 
 srun uv run python scripts/ingest.py batch.txt
 srun uv run python scripts/compact.py</code></pre><p>Note: don’t run <code>build_parts.py</code> or
-                <code>build_wave.py</code> with <code>srun</code>,
+                <code>build_waves.py</code> with <code>srun</code>,
                 because the different tasks will fight each other. See
                 our <a href="https://github.com/cmhainje/talltable/blob/main/slurm/week.sbatch">one-week
                 SLURM script</a> for an example that goes
