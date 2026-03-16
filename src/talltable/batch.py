@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL, PART_MIN_LEVEL
-from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
+from .paths import SCRATCH_DIR, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat, byteswap
 from .partition import level_index_to_part
@@ -139,7 +139,7 @@ class BatchWriter:
         self.pixel_buffer = {k: [] for k in PIXEL_COLUMNS}
 
     def _write_pixels(self):
-        time = f"{now_simpleformat()}_t{self.task_id}"
+        suffix = f"{now_simpleformat()}_t{self.task_id}"
 
         # concatenate all buffered arrays
         data = {}
@@ -158,12 +158,10 @@ class BatchWriter:
         part_ends[:-1] = part_starts[1:]
         part_ends[-1] = len(hppart)
 
-        # write to a single flat HDF5 file via temp + rename
-        PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
-        tmp_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5.tmp"
-        final_path = PIXEL_DB_PATH / f"chunk_{time}.hdf5"
-
-        with h5py.File(tmp_path, "w") as f:
+        # write to a single flat HDF5 file on scratch space
+        SCRATCH_DIR.mkdir(exist_ok=True, parents=True)
+        path = SCRATCH_DIR / f"chunk_{suffix}.hdf5"
+        with h5py.File(path, "w") as f:
             for k, arr in data.items():
                 if k == "hppart":
                     continue
@@ -172,8 +170,6 @@ class BatchWriter:
             f.attrs["part_ids"] = part_ids
             f.attrs["part_starts"] = part_starts
             f.attrs["part_ends"] = part_ends
-
-        tmp_path.rename(final_path)
 
     def _write_images(self):
         IMAGE_PARTS_DIR.mkdir(exist_ok=True)
