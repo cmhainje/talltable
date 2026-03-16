@@ -1,6 +1,7 @@
 #!/bin/bash
-#SBATCH -J week21
-#SBATCH --nodes 1
+#SBATCH -J week18
+#SBATCH -C icelake
+#SBATCH --nodes 2
 #SBATCH --ntasks-per-node 48
 #SBATCH --cpus-per-task 1
 #SBATCH -o /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
@@ -8,8 +9,8 @@
 #SBATCH --mail-type ALL
 #SBATCH --mail-user ch4407@nyu.edu
 
-WEEK=21
-FILE=w${WEEK}-files.txt
+WEEK=18
+FILE=/mnt/home/chainje/spxperiments/slurm/files/w${WEEK}-files.txt
 
 module load uv
 cd /mnt/home/chainje/spxperiments/scripts
@@ -28,3 +29,4 @@ echo "found $(cat $FILE | wc -l) files"
 
 srun uv run python ingest.py $FILE
 srun uv run python compact.py
+uv run python build_parts.py
