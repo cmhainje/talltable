@@ -15,21 +15,28 @@ from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import SCRATCH_DIR, PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR
 
 
-logger = logging.getLogger(__name__)
 task_id = int(os.environ.get("SLURM_PROCID", 0))
 num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
 job_id = os.environ.get("SLURM_JOB_ID", 0)
 out_file = os.environ.get("SLURM_JOB_STDOUT", f"./slurm-{job_id}.out")
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format=f"%(asctime)s [task {task_id}] %(levelname)s %(message)s",
+    force=True,
+)
+logger = logging.getLogger(__name__)
+
+
 def merge_image_parts():
     """merge new partial image parquet files into the final images table"""
     part_files = sorted(IMAGE_PARTS_DIR.glob("image_task*.parquet"))
     if not part_files:
-        logging.info("no image part files to merge")
+        logger.info("no image part files to merge")
         return
 
-    logging.info(f"merging {len(part_files)} image part files")
+    logger.info(f"merging {len(part_files)} image part files")
     tables = []
     if IMAGE_DB_PATH.exists():
         tables.append(pq.read_table(IMAGE_DB_PATH))
@@ -43,7 +50,7 @@ def merge_image_parts():
 
     for f in part_files:
         f.unlink()
-    logging.info(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
+    logger.info(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
 
 
 def scan_chunk_files():
@@ -58,7 +65,7 @@ def scan_chunk_files():
                 part_starts = f.attrs["part_starts"]
                 part_ends = f.attrs["part_ends"]
         except (OSError, KeyError) as e:
-            logging.warning(f"skipping {fpath}: {e}")
+            logger.warning(f"skipping {fpath}: {e}")
             continue
 
         for pid, start, end in zip(part_ids, part_starts, part_ends):
@@ -67,7 +74,7 @@ def scan_chunk_files():
                 partition_index[pid] = []
             partition_index[pid].append((fpath, int(start), int(end)))
 
-    logging.info(f"scanned {len(h5_files)} chunk files, found {len(partition_index)} partitions")
+    logger.info(f"scanned {len(h5_files)} chunk files, found {len(partition_index)} partitions")
     return partition_index
 
 
@@ -95,8 +102,6 @@ def read_partition_data(sources):
 
 
 def main():
-    logging.info(f"processing index {task_id} of {num_tasks} tasks")
-
     # merge image parts (only do once)
     if task_id == 0:
         merge_image_parts()
@@ -108,7 +113,7 @@ def main():
     if num_tasks > 1:
         keys = keys[task_id::num_tasks]
 
-    for part in tqdm(keys):
+    for part in (tqdm(keys) if task_id == 0 else keys):
         try:
             sources = partition_index[part]
             if len(sources) == 0:
@@ -186,17 +191,12 @@ def main():
                 tmp_path.replace(pq_path)
 
         except RuntimeError as e:
-            logging.warning(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
+            logger.warning(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
 
         for handler in logger.handlers:
             handler.flush()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=out_file + f".{task_id}",
-        format=f"%(asctime)s [{task_id}] %(levelname)s %(message)s",
-    )
     with logging_redirect_tqdm():
         main()

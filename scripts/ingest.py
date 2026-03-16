@@ -25,11 +25,18 @@ from talltable.query import get_image_filepaths
 from talltable.paths import DATA_DIR, SCRATCH_DIR, IMAGE_PARTS_DIR
 
 
-logger = logging.getLogger(__name__)
 task_id = int(os.environ.get("SLURM_PROCID", 0))
 num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
 job_id = os.environ.get("SLURM_JOB_ID")
 out_file = os.environ.get("SLURM_JOB_STDOUT", f"./slurm-{job_id}.out")
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format=f"%(asctime)s [task {task_id}] %(levelname)s %(message)s",
+    force=True,
+)
+logger = logging.getLogger(__name__)
 
 
 def parse():
@@ -56,8 +63,6 @@ def reader_worker(filepaths, data_queue):
 
 
 def main(args):
-    logger.info("SLURM task %d of %d", task_id, num_tasks)
-
     if task_id == 0:
         SCRATCH_DIR.mkdir(exist_ok=True, parents=True)
         IMAGE_PARTS_DIR.mkdir(exist_ok=True, parents=True)
@@ -79,7 +84,7 @@ def main(args):
     if num_tasks > 1:
         to_ingest = to_ingest[task_id::num_tasks]
 
-    logger.info("task %d: %d files to ingest", task_id, len(to_ingest))
+    logger.info("%d files to ingest", task_id, len(to_ingest))
 
     if len(to_ingest) == 0:
         return
@@ -93,16 +98,31 @@ def main(args):
     )
     reader.start()
 
-    with tqdm(total=len(to_ingest)) as pbar:
+    if task_id == 0:
+        with tqdm(total=len(to_ingest)) as pbar:
+            while True:
+                fits_data = data_queue.get()
+                if fits_data is _DONE:
+                    break
+                pbar.update(1)
+                if fits_data is None:
+                    continue  # skip failed reads
+                logger.debug("processing %s", basename(fits_data.filepath))
+                batch.process_image(fits_data)
+                for handler in logger.handlers:
+                    handler.flush()
+
+    else:
         while True:
             fits_data = data_queue.get()
             if fits_data is _DONE:
                 break
-            pbar.update(1)
             if fits_data is None:
                 continue  # skip failed reads
             logger.debug("processing %s", basename(fits_data.filepath))
             batch.process_image(fits_data)
+            for handler in logger.handlers:
+                handler.flush()
 
     # flush any remaining buffered data
     if batch.count() > 0:
@@ -112,12 +132,6 @@ def main(args):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        filename=out_file + f".{task_id}",
-        format=f"%(asctime)s [{task_id}] %(levelname)s %(message)s",
-        force=True,
-    )
     args = parse()
     with logging_redirect_tqdm():
         main(args)
