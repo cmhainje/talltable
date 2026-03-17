@@ -113,7 +113,7 @@ def main():
     if num_tasks > 1:
         keys = keys[task_id::num_tasks]
 
-    for part in (tqdm(keys) if task_id == 0 else keys):
+    for part in (tqdm(keys, desc="task 0", unit="part") if task_id == 0 else keys):
         try:
             sources = partition_index[part]
             if len(sources) == 0:

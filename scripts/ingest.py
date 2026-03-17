@@ -99,7 +99,7 @@ def main(args):
     reader.start()
 
     if task_id == 0:
-        with tqdm(total=len(to_ingest)) as pbar:
+        with tqdm(total=len(to_ingest), desc="task 0", unit="file") as pbar:
             while True:
                 fits_data = data_queue.get()
                 if fits_data is _DONE:
