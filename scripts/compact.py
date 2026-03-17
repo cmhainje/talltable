@@ -12,7 +12,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
 from talltable.partition import part_to_level_index, level_index_to_part
-from talltable.paths import SCRATCH_DIR, PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR
+from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR
 
 
 task_id = int(os.environ.get("SLURM_PROCID", 0))
@@ -55,7 +55,7 @@ def merge_image_parts():
 
 def scan_chunk_files():
     """Scan flat HDF5 chunk files and build a partition -> [(file, start, end)] mapping."""
-    h5_files = sorted(SCRATCH_DIR.glob("chunk_*.hdf5"))
+    h5_files = sorted(PIXEL_DB_PATH.glob("chunk_*.hdf5"))
     partition_index = {}
 
     for fpath in h5_files:

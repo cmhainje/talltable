@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL, PART_MIN_LEVEL
-from .paths import SCRATCH_DIR, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
+from .paths import PIXEL_DB_PATH, IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH
 from .waveid import rowcoldet_to_waveid
 from .util import defer_interrupt, now_simpleformat, byteswap
 from .partition import level_index_to_part
@@ -158,9 +158,10 @@ class BatchWriter:
         part_ends[:-1] = part_starts[1:]
         part_ends[-1] = len(hppart)
 
-        # write to a single flat HDF5 file on scratch space
-        SCRATCH_DIR.mkdir(exist_ok=True, parents=True)
-        path = SCRATCH_DIR / f"chunk_{suffix}.hdf5"
+        # write to a single flat HDF5 file
+        PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
+        path = PIXEL_DB_PATH / f"chunk_{suffix}.hdf5"
+
         with h5py.File(path, "w") as f:
             for k, arr in data.items():
                 if k == "hppart":

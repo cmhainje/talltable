@@ -22,7 +22,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 
 from talltable.batch import BatchWriter, read_image
 from talltable.query import get_image_filepaths
-from talltable.paths import DATA_DIR, SCRATCH_DIR, IMAGE_PARTS_DIR
+from talltable.paths import DATA_DIR, PIXEL_DB_PATH, IMAGE_PARTS_DIR
 
 
 task_id = int(os.environ.get("SLURM_PROCID", 0))
@@ -64,7 +64,7 @@ def reader_worker(filepaths, data_queue):
 
 def main(args):
     if task_id == 0:
-        SCRATCH_DIR.mkdir(exist_ok=True, parents=True)
+        PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
         IMAGE_PARTS_DIR.mkdir(exist_ok=True, parents=True)
 
     if IMAGE_PARTS_DIR.exists() and len(list(IMAGE_PARTS_DIR.glob("*.parquet"))) > 0:
