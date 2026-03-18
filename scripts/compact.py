@@ -193,6 +193,9 @@ def main():
         except RuntimeError as e:
             logger.warning(f"warning: failed processing partition {part}:\n{e}\ncontinuing...")
 
+        del tables, table
+        pa.default_memory_pool().release_unused()
+
         for handler in logger.handlers:
             handler.flush()
 
