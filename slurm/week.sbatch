@@ -9,6 +9,7 @@
 #SBATCH --mail-type ALL
 #SBATCH --mail-user ch4407@nyu.edu
 
+set -e
 WEEK=18
 FILE=/mnt/home/chainje/spxperiments/slurm/files/w${WEEK}-files.txt
 
@@ -27,6 +28,6 @@ else
 fi
 echo "found $(cat $FILE | wc -l) files"
 
-srun uv run python ingest.py $FILE
-srun uv run python compact.py
+srun --kill-on-bad-exit=1 uv run python ingest.py $FILE
+srun --kill-on-bad-exit=1 uv run python compact.py
 uv run python post_compact.py
