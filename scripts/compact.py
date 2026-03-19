@@ -76,6 +76,76 @@ def read_partition_data(sources):
     return tables
 
 
+def compact_partition(part, sources):
+    """Compact a single partition. Called in a forked child process."""
+    part_dir = PIXEL_DB_PATH / f"part={part}"
+    part_dir.mkdir(exist_ok=True, parents=True)
+    pq_path = part_dir / "compacted.parquet"
+    staging_path = part_dir / "compacted_new.parquet"
+
+    # read data from all sources
+    tables = []
+
+    # flat chunk files (contiguous slices)
+    if sources:
+        tables.extend(read_partition_data(sources))
+
+    # include existing compacted parquet if present
+    if pq_path.exists():
+        try:
+            tables.append(pq.ParquetFile(pq_path).read())
+        except pa.lib.ArrowInvalid as e:
+            msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
+            raise RuntimeError(msg)
+
+    table = pa.concat_tables(tables)
+    del tables
+
+    # sort
+    sort_keys = [("hphigh", "ascending")]
+    table = table.sort_by(sort_keys)
+    sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
+
+    # check if it's too big
+    level, index = part_to_level_index(part)
+    if len(table) > MAX_ROWS_PER_PART and level < PART_MAX_LEVEL:
+        # split into 4 subpartitions at the next level
+        _level = level + 1
+        for k in range(4):
+            _index = (index << 2) + k
+            _p = level_index_to_part(_level, _index)
+            _part_dir = PIXEL_DB_PATH / f"part={_p}"
+            _part_dir.mkdir(exist_ok=True, parents=True)
+
+            _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
+            _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
+
+            _mask = (pc.field("hphigh") >= _lo) & (pc.field("hphigh") < _hi)
+            _table = table.filter(_mask)
+
+            _pq_path = _part_dir / "compacted_new.parquet"
+            pq.write_table(
+                _table,
+                _pq_path,
+                compression="zstd",
+                compression_level=3,
+                sorting_columns=sorting_cols,
+            )
+
+        # write a marker so post_compact knows to clean up the parent
+        split_marker = part_dir / ".split"
+        split_marker.touch()
+
+    else:
+        pq.write_table(
+            table,
+            staging_path,
+            compression="zstd",
+            compression_level=3,
+            sorting_columns=sorting_cols,
+        )
+
+
 def main():
     # scan flat HDF5 chunk files for partition boundaries
     partition_index = scan_chunk_files()
@@ -84,82 +154,35 @@ def main():
     if num_tasks > 1:
         keys = keys[task_id::num_tasks]
 
-    for part in (tqdm(keys, desc="task 0", unit="part") if task_id == 0 else keys):
+    iterator = tqdm(keys, desc="task 0", unit="part") if task_id == 0 else keys
+
+    for part in iterator:
         sources = partition_index[part]
         if len(sources) == 0:
             continue
 
-        part_dir = PIXEL_DB_PATH / f"part={part}"
-        part_dir.mkdir(exist_ok=True, parents=True)
-        pq_path = part_dir / "compacted.parquet"
-        staging_path = part_dir / "compacted_new.parquet"
-
-        # read data from all sources
-        tables = []
-
-        # flat chunk files (contiguous slices)
-        if sources:
-            tables.extend(read_partition_data(sources))
-
-        # include existing compacted parquet if present
-        if pq_path.exists():
+        child_pid = os.fork()
+        if child_pid == 0:
+            # child process: compact and exit
             try:
-                tables.append(pq.ParquetFile(pq_path).read())
-            except pa.lib.ArrowInvalid as e:
-                msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
-                raise RuntimeError(msg)
+                compact_partition(part, sources)
+                os._exit(0)
+            except Exception:
+                logger.exception(f"failed to compact partition {part}")
+                for handler in logger.handlers:
+                    handler.flush()
+                os._exit(1)
 
-        table = pa.concat_tables(tables)
-
-        # sort
-        sort_keys = [("hphigh", "ascending")]
-        table = table.sort_by(sort_keys)
-        sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
-
-        # check if it's too big
-        level, index = part_to_level_index(part)
-        if len(table) > MAX_ROWS_PER_PART and level < PART_MAX_LEVEL:
-            # split into 4 subpartitions at the next level
-            _level = level + 1
-            for k in range(4):
-                _index = (index << 2) + k
-                _p = level_index_to_part(_level, _index)
-                _part_dir = PIXEL_DB_PATH / f"part={_p}"
-                _part_dir.mkdir(exist_ok=True, parents=True)
-
-                _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
-                _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
-
-                _mask = (pc.field("hphigh") >= _lo) & (pc.field("hphigh") < _hi)
-                _table = table.filter(_mask)
-
-                _pq_path = _part_dir / "compacted_new.parquet"
-                pq.write_table(
-                    _table,
-                    _pq_path,
-                    compression="zstd",
-                    compression_level=3,
-                    sorting_columns=sorting_cols,
-                )
-
-            # write a marker so post_compact knows to clean up the parent
-            split_marker = part_dir / ".split"
-            split_marker.touch()
-
-        else:
-            pq.write_table(
-                table,
-                staging_path,
-                compression="zstd",
-                compression_level=3,
-                sorting_columns=sorting_cols,
+        # parent process: wait for child and check result
+        _, status = os.waitpid(child_pid, 0)
+        if os.WIFSIGNALED(status):
+            sig = os.WTERMSIG(status)
+            raise RuntimeError(
+                f"compact of partition {part} killed by signal {sig}"
             )
-
-        del tables, table
-        pa.default_memory_pool().release_unused()
-
-        for handler in logger.handlers:
-            handler.flush()
+        exit_code = os.WEXITSTATUS(status)
+        if exit_code != 0:
+            raise RuntimeError(f"compact of partition {part} failed (exit {exit_code})")
 
 
 if __name__ == "__main__":
