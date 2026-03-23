@@ -5,6 +5,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 from dataclasses import dataclass
@@ -87,10 +88,12 @@ class BatchWriter:
         zodi = byteswap(data.zodi).astype(np.float32)
         flags = byteswap(data.flags).astype(np.int32)
 
-        wcs = WCS(header=data.header)
+        wcs = WCS(header=data.header.dea)
         ra, dec = wcs.all_pix2world(ALL_COL, ALL_ROW, 0)
-
-        hphi = hp.ang2pix(2**HP_HIGH_LEVEL, ra, dec, nest=True, lonlat=True)
+        coords = SkyCoord(ra=ra, dec=dec, unit='deg', frame='icrs')
+        coords = coords.transform_to('galactic')
+        hphi = hp.ang2pix(2**HP_HIGH_LEVEL, coords.l.deg, coords.b.deg, nest=True, lonlat=True)
+        del ra, dec, coords
 
         max_part = level_index_to_part(
             PART_MAX_LEVEL, hphi >> (2 * (HP_HIGH_LEVEL - PART_MAX_LEVEL))
