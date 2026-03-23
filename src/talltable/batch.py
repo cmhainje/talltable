@@ -88,7 +88,7 @@ class BatchWriter:
         zodi = byteswap(data.zodi).astype(np.float32)
         flags = byteswap(data.flags).astype(np.int32)
 
-        wcs = WCS(header=data.header.dea)
+        wcs = WCS(header=data.header)
         ra, dec = wcs.all_pix2world(ALL_COL, ALL_ROW, 0)
         coords = SkyCoord(ra=ra, dec=dec, unit='deg', frame='icrs')
         coords = coords.transform_to('galactic')
