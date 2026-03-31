@@ -9,7 +9,8 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -156,21 +157,32 @@ macro_rules! extend_from_batch {
     };
 }
 
-/// Read a typed column slice from a binary chunk file.
-fn read_bin_column<T: bytemuck::Pod>(
-    f: &mut std::fs::File,
+/// Read a typed column slice from a binary chunk file directly into a Vec.
+/// Uses pread (positional read) — no seeking, no file position state.
+fn read_bin_column_into<T: bytemuck::Pod>(
+    f: &std::fs::File,
     header_size: usize,
     col_byte_offset: usize,
     start: usize,
     end: usize,
-) -> anyhow::Result<Vec<T>> {
+    dest: &mut Vec<T>,
+) -> anyhow::Result<()> {
     let elem_size = std::mem::size_of::<T>();
-    let offset = header_size + col_byte_offset + start * elem_size;
-    f.seek(SeekFrom::Start(offset as u64))?;
+    let offset = (header_size + col_byte_offset + start * elem_size) as u64;
     let count = end - start;
-    let mut buf = vec![0u8; count * elem_size];
-    f.read_exact(&mut buf)?;
-    Ok(bytemuck::cast_slice(&buf).to_vec())
+    let old_len = dest.len();
+    dest.reserve(count);
+    // SAFETY: we're extending into the spare capacity, then reading bytes into it.
+    // read_exact_at will fill exactly count * elem_size bytes or return an error.
+    unsafe {
+        let spare = std::slice::from_raw_parts_mut(
+            dest.as_mut_ptr().add(old_len) as *mut u8,
+            count * elem_size,
+        );
+        f.read_exact_at(spare, offset)?;
+        dest.set_len(old_len + count);
+    }
+    Ok(())
 }
 
 fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyhow::Result<()> {
@@ -235,19 +247,19 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
         // Column byte offsets within the data section (after header).
         // Must match the write order in batch.py CHUNK_COLUMNS.
         let mut off = 0usize;
-        col_flux.extend(read_bin_column::<f32>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<f32>(&f, header_size, off, start, end, &mut col_flux)?;
         off += file_num_rows * 4;
-        col_variance.extend(read_bin_column::<f32>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<f32>(&f, header_size, off, start, end, &mut col_variance)?;
         off += file_num_rows * 4;
-        col_zodi.extend(read_bin_column::<f32>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<f32>(&f, header_size, off, start, end, &mut col_zodi)?;
         off += file_num_rows * 4;
-        col_flags.extend(read_bin_column::<i32>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<i32>(&f, header_size, off, start, end, &mut col_flags)?;
         off += file_num_rows * 4;
-        col_hphigh.extend(read_bin_column::<i64>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<i64>(&f, header_size, off, start, end, &mut col_hphigh)?;
         off += file_num_rows * 8;
-        col_waveid.extend(read_bin_column::<i32>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<i32>(&f, header_size, off, start, end, &mut col_waveid)?;
         off += file_num_rows * 4;
-        col_imageid.extend(read_bin_column::<i64>(&mut f, header_size, off, start, end)?);
+        read_bin_column_into::<i64>(&f, header_size, off, start, end, &mut col_imageid)?;
     }
 
     // sort by hphigh — one column at a time to avoid 2x total memory
@@ -327,9 +339,12 @@ fn main() -> anyhow::Result<()> {
     let job_id = std::env::var("SLURM_JOB_ID").unwrap_or(0.to_string());
     let _out_file = std::env::var("SLURM_JOB_STDOUT").unwrap_or(format!("./slurm-{}.out", job_id));
     let cpus = int_env("SLURM_CPUS_PER_TASK", num_cpus::get())?;
+    // Default to 4x CPU count since this workload is I/O-bound.
+    // Override with COMPACT_THREADS if needed.
+    let num_threads = int_env("COMPACT_THREADS", cpus * 4)?;
 
     rayon::ThreadPoolBuilder::new()
-        .num_threads(cpus)
+        .num_threads(num_threads)
         .build_global()?;
 
     let part_index = scan_chunk_files()?;
