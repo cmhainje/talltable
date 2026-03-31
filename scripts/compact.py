@@ -1,4 +1,3 @@
-import h5py
 import logging
 import numpy as np
 import os
@@ -9,6 +8,7 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
+from talltable.batch import CHUNK_COLUMNS
 from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
 from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import PIXEL_DB_PATH
@@ -29,17 +29,18 @@ logger = logging.getLogger(__name__)
 
 
 def scan_chunk_files():
-    """Scan flat HDF5 chunk files and build a partition -> [(file, start, end)] mapping."""
-    h5_files = sorted(PIXEL_DB_PATH.glob("chunk_*.hdf5"))
+    """Scan binary chunk files and build a partition -> [(file, start, end)] mapping."""
+    bin_files = sorted(PIXEL_DB_PATH.glob("chunk_*.bin"))
     partition_index = {}
 
-    for fpath in h5_files:
+    for fpath in bin_files:
         try:
-            with h5py.File(fpath, "r") as f:
-                part_ids = f.attrs["part_ids"]
-                part_starts = f.attrs["part_starts"]
-                part_ends = f.attrs["part_ends"]
-        except (OSError, KeyError) as e:
+            with open(fpath, "rb") as f:
+                num_part = np.fromfile(f, dtype=np.uint32, count=1)[0]
+                part_ids = np.fromfile(f, dtype=np.uint32, count=num_part)
+                part_starts = np.fromfile(f, dtype=np.uint64, count=num_part)
+                part_ends = np.fromfile(f, dtype=np.uint64, count=num_part)
+        except (OSError, ValueError) as e:
             logger.warning(f"skipping {fpath}: {e}")
             continue
 
@@ -49,30 +50,29 @@ def scan_chunk_files():
                 partition_index[pid] = []
             partition_index[pid].append((fpath, int(start), int(end)))
 
-    logger.info(f"scanned {len(h5_files)} chunk files, found {len(partition_index)} partitions")
+    logger.info(f"scanned {len(bin_files)} chunk files, found {len(partition_index)} partitions")
     return partition_index
 
 
 def read_partition_data(sources):
-    """Read a partition's data from flat HDF5 files using contiguous slices."""
+    """Read a partition's data from binary chunk files using contiguous slices."""
     tables = []
     for fpath, start, end in sources:
-        data = {}
-        with h5py.File(fpath, "r") as f:
-            for key in f.keys():
-                data[key] = f[key][start:end]
-        try:
-            tables.append(pa.table(data))
-        except pa.lib.ArrowInvalid as e:
-            msg = f"failed to read slice [{start}:{end}] from {fpath}.\n"
-            msg += "data dict included:\n"
-            for key in data:
-                if isinstance(data[key], np.ndarray):
-                    msg += f"{key}: np.array [{data[key].shape}]\n"
-                else:
-                    msg += f"{key}: {data[key]}\n"
-            msg += f"error message:\n{e}"
-            raise RuntimeError(msg)
+        with open(fpath, "rb") as f:
+            num_part = np.fromfile(f, dtype=np.uint32, count=1)[0]
+            header_size = 4 + num_part * 20 + 8
+            f.seek(header_size - 8)
+            num_rows = int(np.fromfile(f, dtype=np.uint64, count=1)[0])
+
+            data = {}
+            col_offset = header_size
+            for name, dtype in CHUNK_COLUMNS:
+                itemsize = np.dtype(dtype).itemsize
+                f.seek(col_offset + start * itemsize)
+                data[name] = np.fromfile(f, dtype=dtype, count=end - start)
+                col_offset += num_rows * itemsize
+
+        tables.append(pa.table(data))
     return tables
 
 
@@ -147,7 +147,7 @@ def compact_partition(part, sources):
 
 
 def main():
-    # scan flat HDF5 chunk files for partition boundaries
+    # scan binary chunk files for partition boundaries
     partition_index = scan_chunk_files()
 
     keys = sorted(partition_index.keys())
