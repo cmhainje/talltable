@@ -162,17 +162,17 @@ impl ColumnData {
         self.imageid = apply_permutation(std::mem::take(&mut self.imageid), &indices);
     }
 
-    fn to_record_batch(&self, schema: &Arc<Schema>) -> anyhow::Result<RecordBatch> {
+    fn into_record_batch(self, schema: &Arc<Schema>) -> anyhow::Result<RecordBatch> {
         Ok(RecordBatch::try_new(
             Arc::clone(schema),
             vec![
-                Arc::new(Float32Array::from(self.flux.clone())),
-                Arc::new(Float32Array::from(self.variance.clone())),
-                Arc::new(Float32Array::from(self.zodi.clone())),
-                Arc::new(Int32Array::from(self.flags.clone())),
-                Arc::new(Int64Array::from(self.hphigh.clone())),
-                Arc::new(Int32Array::from(self.waveid.clone())),
-                Arc::new(Int64Array::from(self.imageid.clone())),
+                Arc::new(Float32Array::from(self.flux)),
+                Arc::new(Float32Array::from(self.variance)),
+                Arc::new(Float32Array::from(self.zodi)),
+                Arc::new(Int32Array::from(self.flags)),
+                Arc::new(Int64Array::from(self.hphigh)),
+                Arc::new(Int32Array::from(self.waveid)),
+                Arc::new(Int64Array::from(self.imageid)),
             ],
         )?)
     }
@@ -403,9 +403,9 @@ fn execute_merge_plan(
                 {
                     // flush current buffer before switching writers
                     if buf.len() > 0 {
-                        let batch = buf.to_record_batch(schema)?;
+                        let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
+                        .into_record_batch(schema)?;
                         writers[writer_idx].1.write(&batch)?;
-                        buf.clear();
                     }
                     writer_idx += 1;
                 }
@@ -423,7 +423,8 @@ fn execute_merge_plan(
                 if chunk == 0 {
                     // Current row is at/past boundary — flush and switch
                     if buf.len() > 0 {
-                        let batch = buf.to_record_batch(schema)?;
+                        let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
+                        .into_record_batch(schema)?;
                         writers[writer_idx].1.write(&batch)?;
                         buf.clear();
                     }
@@ -436,16 +437,17 @@ fn execute_merge_plan(
             written += chunk;
 
             if buf.len() >= BATCH_SIZE {
-                let batch = buf.to_record_batch(schema)?;
+                let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
+                        .into_record_batch(schema)?;
                 writers[writer_idx].1.write(&batch)?;
-                buf.clear();
             }
         }
     }
 
     // flush remainder
     if buf.len() > 0 {
-        let batch = buf.to_record_batch(schema)?;
+        let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
+                        .into_record_batch(schema)?;
         writers[writer_idx].1.write(&batch)?;
         buf.clear();
     }
@@ -469,6 +471,8 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
     std::fs::create_dir_all(&part_dir)?;
     let pq_path = format!("{}/compacted.parquet", &part_dir);
     let staging_path = format!("{}/compacted_new.parquet", &part_dir);
+
+    let t0 = std::time::Instant::now();
 
     // Collect sorted runs for the k-way merge.
     let mut runs: Vec<ColumnData> = Vec::new();
@@ -506,6 +510,8 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
         runs.push(run);
     }
 
+    let t_read = t0.elapsed();
+
     // Fast path: single run, no merge needed
     if runs.len() == 1 && total_rows <= MAX_ROWS_PER_PART {
         let mut writer = open_writer(&staging_path, &schema)?;
@@ -516,7 +522,7 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
             let end = (offset + BATCH_SIZE).min(run.len());
             let mut buf = ColumnData::with_capacity(end - offset);
             buf.extend_from_slices(run, offset, end);
-            writer.write(&buf.to_record_batch(&schema)?)?;
+            writer.write(&buf.into_record_batch(&schema)?)?;
             offset = end;
         }
         writer.close()?;
@@ -524,7 +530,9 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
     }
 
     // Build the merge plan
+    let t_merge_start = std::time::Instant::now();
     let plan = build_merge_plan(&runs);
+    let t_plan = t_merge_start.elapsed();
 
     // Check if partition needs splitting
     let (level, index) = part_to_level_index(*part);
@@ -567,6 +575,20 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
             writer.close()?;
         }
     }
+
+    let t_total = t0.elapsed();
+    let t_write = t_total - t_read - t_plan;
+    eprintln!(
+        "part {}: {} rows ({} runs, {} blocks), read {:.1}s, plan {:.1}s, write {:.1}s, total {:.1}s",
+        part,
+        total_rows,
+        runs.len(),
+        plan.len(),
+        t_read.as_secs_f64(),
+        t_plan.as_secs_f64(),
+        t_write.as_secs_f64(),
+        t_total.as_secs_f64(),
+    );
 
     Ok(())
 }
