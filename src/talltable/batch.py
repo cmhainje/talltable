@@ -156,8 +156,11 @@ class BatchWriter:
         for k, arr_list in self.pixel_buffer.items():
             data[k] = np.concatenate(arr_list)
 
-        # sort by hppart so data for the same partition is contiguous
-        sort_idx = np.argsort(data["hppart"], kind="mergesort")
+        # sort by hphigh; since active partitions tile the hphigh space without
+        # overlap, this also makes data for the same partition contiguous, AND
+        # leaves each partition's slice sorted by hphigh for efficient merging
+        # during compaction.
+        sort_idx = np.argsort(data["hphigh"], kind="mergesort")
         for k in data:
             data[k] = data[k][sort_idx]
 
