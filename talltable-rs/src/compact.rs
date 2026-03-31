@@ -70,16 +70,6 @@ impl ColumnData {
         self.hphigh.len()
     }
 
-    fn clear(&mut self) {
-        self.flux.clear();
-        self.variance.clear();
-        self.zodi.clear();
-        self.flags.clear();
-        self.hphigh.clear();
-        self.waveid.clear();
-        self.imageid.clear();
-    }
-
     fn extend_from_batch(&mut self, batch: &RecordBatch) {
         macro_rules! extend_col {
             ($field:ident, $name:literal, $arrow_ty:ty) => {
@@ -378,13 +368,23 @@ fn build_merge_plan(runs: &[ColumnData]) -> Vec<MergeBlock> {
     plan
 }
 
-/// Execute a merge plan, streaming output through an ArrowWriter in batches.
-/// For partition splitting, multiple writers can be provided with hphigh thresholds.
-fn execute_merge_plan(
+/// Execute a merge plan into a single ColumnData.
+/// All access is sequential — extend_from_slice compiles to memcpy.
+fn collect_merge(plan: &[MergeBlock], runs: &[ColumnData], total_rows: usize) -> ColumnData {
+    let mut out = ColumnData::with_capacity(total_rows);
+    for block in plan {
+        out.extend_from_slices(&runs[block.run_idx], block.start, block.start + block.len);
+    }
+    out
+}
+
+/// Execute a merge plan with streaming output for the partition-split case.
+/// Routes rows to the correct child writer based on hphigh boundaries.
+fn execute_merge_split(
     plan: &[MergeBlock],
     runs: &[ColumnData],
     schema: &Arc<Schema>,
-    writers: &mut [(i64, ArrowWriter<std::fs::File>)], // (hphigh_upper_bound, writer)
+    writers: &mut [(i64, ArrowWriter<std::fs::File>)],
 ) -> anyhow::Result<()> {
     let mut buf = ColumnData::with_capacity(BATCH_SIZE);
     let mut writer_idx = 0;
@@ -396,37 +396,30 @@ fn execute_merge_plan(
         while written < block.len {
             let s = block.start + written;
 
-            // Check if we need to switch to the next writer (partition split boundary)
-            if writers.len() > 1 {
-                while writer_idx < writers.len() - 1
-                    && src.hphigh[s] >= writers[writer_idx].0
-                {
-                    // flush current buffer before switching writers
-                    if buf.len() > 0 {
-                        let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
+            // Switch to next writer if we've crossed a partition boundary
+            while writer_idx < writers.len() - 1
+                && src.hphigh[s] >= writers[writer_idx].0
+            {
+                if buf.len() > 0 {
+                    let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
                         .into_record_batch(schema)?;
-                        writers[writer_idx].1.write(&batch)?;
-                    }
-                    writer_idx += 1;
+                    writers[writer_idx].1.write(&batch)?;
                 }
+                writer_idx += 1;
             }
 
-            // Determine how many rows we can copy in this iteration.
-            // Limited by: remaining in block, buffer capacity, and next split boundary.
+            // Don't copy past the current writer's hphigh boundary
             let mut chunk = (block.len - written).min(BATCH_SIZE - buf.len());
-            if writers.len() > 1 && writer_idx < writers.len() - 1 {
-                // Don't copy past the current writer's hphigh boundary
+            if writer_idx < writers.len() - 1 {
                 let boundary = writers[writer_idx].0;
                 let rows_before_boundary = src.hphigh[s..s + chunk]
                     .partition_point(|&v| v < boundary);
                 chunk = chunk.min(rows_before_boundary);
                 if chunk == 0 {
-                    // Current row is at/past boundary — flush and switch
                     if buf.len() > 0 {
                         let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
-                        .into_record_batch(schema)?;
+                            .into_record_batch(schema)?;
                         writers[writer_idx].1.write(&batch)?;
-                        buf.clear();
                     }
                     writer_idx += 1;
                     continue;
@@ -438,18 +431,14 @@ fn execute_merge_plan(
 
             if buf.len() >= BATCH_SIZE {
                 let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
-                        .into_record_batch(schema)?;
+                    .into_record_batch(schema)?;
                 writers[writer_idx].1.write(&batch)?;
             }
         }
     }
 
-    // flush remainder
     if buf.len() > 0 {
-        let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
-                        .into_record_batch(schema)?;
-        writers[writer_idx].1.write(&batch)?;
-        buf.clear();
+        writers[writer_idx].1.write(&buf.into_record_batch(schema)?)?;
     }
 
     Ok(())
@@ -533,11 +522,13 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
     let t_merge_start = std::time::Instant::now();
     let plan = build_merge_plan(&runs);
     let t_plan = t_merge_start.elapsed();
+    let num_runs = runs.len();
+    let num_blocks = plan.len();
 
     // Check if partition needs splitting
     let (level, index) = part_to_level_index(*part);
     if total_rows > MAX_ROWS_PER_PART && level < PART_MAX_LEVEL {
-        // Split into 4 child partitions
+        // Split into 4 child partitions — use streaming writer
         let child_level = level + 1;
         let mut writers: Vec<(i64, ArrowWriter<std::fs::File>)> = Vec::new();
 
@@ -553,27 +544,26 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
             writers.push((hi, writer));
         }
 
-        // Last writer gets i64::MAX as upper bound so it catches everything
         if let Some(last) = writers.last_mut() {
             last.0 = i64::MAX;
         }
 
-        execute_merge_plan(&plan, &runs, &schema, &mut writers)?;
+        execute_merge_split(&plan, &runs, &schema, &mut writers)?;
 
-        // Close all writers
         for (_, writer) in writers {
             writer.close()?;
         }
 
-        // Write split marker
         std::fs::File::create(format!("{}/.split", part_dir))?;
     } else {
-        let mut writers = vec![(i64::MAX, open_writer(&staging_path, &schema)?)];
-        execute_merge_plan(&plan, &runs, &schema, &mut writers)?;
+        // Non-split: collect merge into one big batch, single write call
+        let merged = collect_merge(&plan, &runs, total_rows);
+        drop(runs); // free input memory before writing
 
-        for (_, writer) in writers {
-            writer.close()?;
-        }
+        let file = std::fs::File::create(&staging_path)?;
+        let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(writer_props()))?;
+        writer.write(&merged.into_record_batch(&schema)?)?;
+        writer.close()?;
     }
 
     let t_total = t0.elapsed();
@@ -582,8 +572,8 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
         "part {}: {} rows ({} runs, {} blocks), read {:.1}s, plan {:.1}s, write {:.1}s, total {:.1}s",
         part,
         total_rows,
-        runs.len(),
-        plan.len(),
+        num_runs,
+        num_blocks,
         t_read.as_secs_f64(),
         t_plan.as_secs_f64(),
         t_write.as_secs_f64(),
