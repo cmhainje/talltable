@@ -72,12 +72,15 @@ def read_partition_data(sources):
                 data[name] = np.fromfile(f, dtype=dtype, count=end - start)
                 col_offset += num_rows * itemsize
 
-        tables.append(pa.table(data))
+        tables.append(pa.table({k: data[k] for k in sorted(data)}))
     return tables
 
 
 def compact_partition(part, sources):
     """Compact a single partition. Called in a forked child process."""
+    import time as _time
+    t0 = _time.monotonic()
+
     part_dir = PIXEL_DB_PATH / f"part={part}"
     part_dir.mkdir(exist_ok=True, parents=True)
     pq_path = part_dir / "compacted.parquet"
@@ -98,13 +101,19 @@ def compact_partition(part, sources):
             msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
             raise RuntimeError(msg)
 
+    t_read = _time.monotonic() - t0
+
     table = pa.concat_tables(tables)
+    total_rows = len(table)
+    num_sources = len(sources) + (1 if pq_path.exists() else 0)
     del tables
 
     # sort
     sort_keys = [("hphigh", "ascending")]
     table = table.sort_by(sort_keys)
     sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
+
+    t_sort = _time.monotonic() - t0 - t_read
 
     # check if it's too big
     level, index = part_to_level_index(part)
@@ -144,6 +153,13 @@ def compact_partition(part, sources):
             compression_level=3,
             sorting_columns=sorting_cols,
         )
+
+    t_total = _time.monotonic() - t0
+    t_write = t_total - t_read - t_sort
+    logger.info(
+        f"part {part}: {total_rows} rows ({num_sources} sources), "
+        f"read {t_read:.1f}s, sort {t_sort:.1f}s, write {t_write:.1f}s, total {t_total:.1f}s"
+    )
 
 
 def main():
