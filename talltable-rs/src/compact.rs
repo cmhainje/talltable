@@ -7,6 +7,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
+use std::io::BufWriter;
 use rayon::prelude::*;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -302,11 +303,13 @@ fn pixel_schema() -> Arc<Schema> {
 fn writer_props() -> WriterProperties {
     WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+        .set_dictionary_enabled(false)
+        .set_max_row_group_row_count(Some(64 * 1024 * 1024)) // 64M rows — fewer, larger row groups
         .build()
 }
 
-fn open_writer(path: &str, schema: &Arc<Schema>) -> anyhow::Result<ArrowWriter<std::fs::File>> {
-    let file = std::fs::File::create(path)?;
+fn open_writer(path: &str, schema: &Arc<Schema>) -> anyhow::Result<ArrowWriter<BufWriter<std::fs::File>>> {
+    let file = BufWriter::with_capacity(4 * 1024 * 1024, std::fs::File::create(path)?);
     Ok(ArrowWriter::try_new(file, Arc::clone(schema), Some(writer_props()))?)
 }
 
@@ -384,7 +387,7 @@ fn execute_merge_split(
     plan: &[MergeBlock],
     runs: &[ColumnData],
     schema: &Arc<Schema>,
-    writers: &mut [(i64, ArrowWriter<std::fs::File>)],
+    writers: &mut [(i64, ArrowWriter<BufWriter<std::fs::File>>)],
 ) -> anyhow::Result<()> {
     let mut buf = ColumnData::with_capacity(BATCH_SIZE);
     let mut writer_idx = 0;
@@ -501,19 +504,11 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
 
     let t_read = t0.elapsed();
 
-    // Fast path: single run, no merge needed
+    // Fast path: single run, no merge needed — single write call
     if runs.len() == 1 && total_rows <= MAX_ROWS_PER_PART {
+        let run = runs.pop().unwrap();
         let mut writer = open_writer(&staging_path, &schema)?;
-        let run = &runs[0];
-        // Stream in batches
-        let mut offset = 0;
-        while offset < run.len() {
-            let end = (offset + BATCH_SIZE).min(run.len());
-            let mut buf = ColumnData::with_capacity(end - offset);
-            buf.extend_from_slices(run, offset, end);
-            writer.write(&buf.into_record_batch(&schema)?)?;
-            offset = end;
-        }
+        writer.write(&run.into_record_batch(&schema)?)?;
         writer.close()?;
         return Ok(());
     }
@@ -530,7 +525,7 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
     if total_rows > MAX_ROWS_PER_PART && level < PART_MAX_LEVEL {
         // Split into 4 child partitions — use streaming writer
         let child_level = level + 1;
-        let mut writers: Vec<(i64, ArrowWriter<std::fs::File>)> = Vec::new();
+        let mut writers: Vec<(i64, ArrowWriter<BufWriter<std::fs::File>>)> = Vec::new();
 
         for k in 0u32..4 {
             let child_index = (index << 2) + k;
@@ -560,7 +555,7 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
         let merged = collect_merge(&plan, &runs, total_rows);
         drop(runs); // free input memory before writing
 
-        let file = std::fs::File::create(&staging_path)?;
+        let file = BufWriter::with_capacity(4 * 1024 * 1024, std::fs::File::create(&staging_path)?);
         let mut writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(writer_props()))?;
         writer.write(&merged.into_record_batch(&schema)?)?;
         writer.close()?;

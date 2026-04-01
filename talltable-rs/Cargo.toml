@@ -7,6 +7,11 @@ edition = "2024"
 name = "compact"
 path = "src/compact.rs"
 
+# Profile for profiling: optimized but with debug symbols for perf/flamegraph
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [dependencies]
 anyhow = "1.0.102"
 arrow = "58.1.0"
