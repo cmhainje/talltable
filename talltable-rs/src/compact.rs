@@ -121,15 +121,16 @@ impl ColumnData {
         Ok(())
     }
 
-    /// Copy a row range from another ColumnData into self.
-    fn extend_from_slices(&mut self, other: &ColumnData, start: usize, end: usize) {
-        self.flux.extend_from_slice(&other.flux[start..end]);
-        self.variance.extend_from_slice(&other.variance[start..end]);
-        self.zodi.extend_from_slice(&other.zodi[start..end]);
-        self.flags.extend_from_slice(&other.flags[start..end]);
-        self.hphigh.extend_from_slice(&other.hphigh[start..end]);
-        self.waveid.extend_from_slice(&other.waveid[start..end]);
-        self.imageid.extend_from_slice(&other.imageid[start..end]);
+    /// Push a single row from another ColumnData.
+    #[inline]
+    fn push_row(&mut self, other: &ColumnData, i: usize) {
+        self.flux.push(other.flux[i]);
+        self.variance.push(other.variance[i]);
+        self.zodi.push(other.zodi[i]);
+        self.flags.push(other.flags[i]);
+        self.hphigh.push(other.hphigh[i]);
+        self.waveid.push(other.waveid[i]);
+        self.imageid.push(other.imageid[i]);
     }
 
     fn is_sorted_by_hphigh(&self) -> bool {
@@ -304,7 +305,7 @@ fn writer_props() -> WriterProperties {
     WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
         .set_dictionary_enabled(false)
-        .set_max_row_group_row_count(Some(64 * 1024 * 1024)) // 64M rows — fewer, larger row groups
+        .set_max_row_group_row_count(Some(1_048_576)) // 1M rows (default)
         .build()
 }
 
@@ -317,20 +318,16 @@ fn open_writer(path: &str, schema: &Arc<Schema>) -> anyhow::Result<ArrowWriter<B
 // K-way block merge
 // ---------------------------------------------------------------------------
 
-/// A merge plan entry: copy rows [start..start+len) from runs[run_idx].
-struct MergeBlock {
-    run_idx: usize,
-    start: usize,
-    len: usize,
-}
-
-/// Build a block-level merge plan from K sorted runs.
-/// Each block is a maximal contiguous range from one run that stays in global sorted order.
-fn build_merge_plan(runs: &[ColumnData]) -> Vec<MergeBlock> {
-    let total: usize = runs.iter().map(|r| r.len()).sum();
-    let mut plan: Vec<MergeBlock> = Vec::new();
-    if total == 0 {
-        return plan;
+/// Fused k-way merge: merges sorted runs directly into output, element-wise.
+///
+/// Uses a min-heap to always pick the run with the smallest current hphigh,
+/// then copies that single row to the output. All heap operations are O(log K)
+/// where K is the number of runs — the heap is tiny and stays in L1 cache.
+/// All writes to `out` are sequential (push to pre-allocated Vecs).
+fn merge_runs(runs: &[ColumnData], total_rows: usize) -> ColumnData {
+    let mut out = ColumnData::with_capacity(total_rows);
+    if total_rows == 0 {
+        return out;
     }
 
     // min-heap of (hphigh_value, run_index)
@@ -338,53 +335,27 @@ fn build_merge_plan(runs: &[ColumnData]) -> Vec<MergeBlock> {
     let mut cursors: Vec<usize> = vec![0; runs.len()];
 
     for (i, run) in runs.iter().enumerate() {
-        if run.len() > 0 {
+        if !run.hphigh.is_empty() {
             heap.push(Reverse((run.hphigh[0], i)));
         }
     }
 
     while let Some(Reverse((_, winner))) = heap.pop() {
         let cur = cursors[winner];
-        let run = &runs[winner];
+        out.push_row(&runs[winner], cur);
+        cursors[winner] = cur + 1;
 
-        // Find the block size: how many rows from winner are ≤ the next run's current hphigh?
-        let next_limit = heap
-            .peek()
-            .map(|&Reverse((hp, _))| hp)
-            .unwrap_or(i64::MAX);
-
-        let block_len = run.hphigh[cur..]
-            .partition_point(|&v| v <= next_limit);
-
-        plan.push(MergeBlock {
-            run_idx: winner,
-            start: cur,
-            len: block_len,
-        });
-
-        cursors[winner] = cur + block_len;
-        if cursors[winner] < run.len() {
-            heap.push(Reverse((run.hphigh[cursors[winner]], winner)));
+        if cursors[winner] < runs[winner].len() {
+            heap.push(Reverse((runs[winner].hphigh[cursors[winner]], winner)));
         }
     }
 
-    plan
-}
-
-/// Execute a merge plan into a single ColumnData.
-/// All access is sequential — extend_from_slice compiles to memcpy.
-fn collect_merge(plan: &[MergeBlock], runs: &[ColumnData], total_rows: usize) -> ColumnData {
-    let mut out = ColumnData::with_capacity(total_rows);
-    for block in plan {
-        out.extend_from_slices(&runs[block.run_idx], block.start, block.start + block.len);
-    }
     out
 }
 
-/// Execute a merge plan with streaming output for the partition-split case.
+/// Fused k-way merge with streaming output for the partition-split case.
 /// Routes rows to the correct child writer based on hphigh boundaries.
-fn execute_merge_split(
-    plan: &[MergeBlock],
+fn merge_runs_split(
     runs: &[ColumnData],
     schema: &Arc<Schema>,
     writers: &mut [(i64, ArrowWriter<BufWriter<std::fs::File>>)],
@@ -392,51 +363,38 @@ fn execute_merge_split(
     let mut buf = ColumnData::with_capacity(BATCH_SIZE);
     let mut writer_idx = 0;
 
-    for block in plan {
-        let src = &runs[block.run_idx];
-        let mut written = 0;
+    let mut heap: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
+    let mut cursors: Vec<usize> = vec![0; runs.len()];
 
-        while written < block.len {
-            let s = block.start + written;
+    for (i, run) in runs.iter().enumerate() {
+        if !run.hphigh.is_empty() {
+            heap.push(Reverse((run.hphigh[0], i)));
+        }
+    }
 
-            // Switch to next writer if we've crossed a partition boundary
-            while writer_idx < writers.len() - 1
-                && src.hphigh[s] >= writers[writer_idx].0
-            {
-                if buf.len() > 0 {
-                    let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
-                        .into_record_batch(schema)?;
-                    writers[writer_idx].1.write(&batch)?;
-                }
-                writer_idx += 1;
-            }
-
-            // Don't copy past the current writer's hphigh boundary
-            let mut chunk = (block.len - written).min(BATCH_SIZE - buf.len());
-            if writer_idx < writers.len() - 1 {
-                let boundary = writers[writer_idx].0;
-                let rows_before_boundary = src.hphigh[s..s + chunk]
-                    .partition_point(|&v| v < boundary);
-                chunk = chunk.min(rows_before_boundary);
-                if chunk == 0 {
-                    if buf.len() > 0 {
-                        let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
-                            .into_record_batch(schema)?;
-                        writers[writer_idx].1.write(&batch)?;
-                    }
-                    writer_idx += 1;
-                    continue;
-                }
-            }
-
-            buf.extend_from_slices(src, s, s + chunk);
-            written += chunk;
-
-            if buf.len() >= BATCH_SIZE {
+    while let Some(Reverse((hp, winner))) = heap.pop() {
+        // Switch to next writer if we've crossed a partition boundary
+        while writer_idx < writers.len() - 1 && hp >= writers[writer_idx].0 {
+            if buf.len() > 0 {
                 let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
                     .into_record_batch(schema)?;
                 writers[writer_idx].1.write(&batch)?;
             }
+            writer_idx += 1;
+        }
+
+        let cur = cursors[winner];
+        buf.push_row(&runs[winner], cur);
+        cursors[winner] = cur + 1;
+
+        if buf.len() >= BATCH_SIZE {
+            let batch = std::mem::replace(&mut buf, ColumnData::with_capacity(BATCH_SIZE))
+                .into_record_batch(schema)?;
+            writers[writer_idx].1.write(&batch)?;
+        }
+
+        if cursors[winner] < runs[winner].len() {
+            heap.push(Reverse((runs[winner].hphigh[cursors[winner]], winner)));
         }
     }
 
@@ -484,20 +442,26 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
     }
 
     // Runs 1..K: binary chunk sources (sorted by hphigh if batch.py sorts by hphigh)
-    for (fpath, start, end) in sources.iter() {
-        let mut f = std::fs::File::open(fpath)?;
-        let (_, _, _, _, file_num_rows, header_size) = read_chunk_header(&mut f)?;
-        let count = end - start;
+    // Read in parallel — each source is an independent file slice.
+    let chunk_runs: Vec<anyhow::Result<ColumnData>> = sources
+        .par_iter()
+        .map(|(fpath, start, end)| {
+            let mut f = std::fs::File::open(fpath)?;
+            let (_, _, _, _, file_num_rows, header_size) = read_chunk_header(&mut f)?;
 
-        let mut run = ColumnData::with_capacity(count);
-        run.read_from_bin(&f, header_size, file_num_rows, *start, *end)?;
+            let mut run = ColumnData::with_capacity(end - start);
+            run.read_from_bin(&f, header_size, file_num_rows, *start, *end)?;
 
-        // Sort if not already sorted (handles legacy chunk files written before
-        // batch.py was changed to sort by hphigh)
-        if !run.is_sorted_by_hphigh() {
-            run.sort_by_hphigh();
-        }
+            if !run.is_sorted_by_hphigh() {
+                run.sort_by_hphigh();
+            }
 
+            Ok(run)
+        })
+        .collect();
+
+    for result in chunk_runs {
+        let run = result?;
         total_rows += run.len();
         runs.push(run);
     }
@@ -513,17 +477,12 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
         return Ok(());
     }
 
-    // Build the merge plan
-    let t_merge_start = std::time::Instant::now();
-    let plan = build_merge_plan(&runs);
-    let t_plan = t_merge_start.elapsed();
     let num_runs = runs.len();
-    let num_blocks = plan.len();
 
     // Check if partition needs splitting
     let (level, index) = part_to_level_index(*part);
     if total_rows > MAX_ROWS_PER_PART && level < PART_MAX_LEVEL {
-        // Split into 4 child partitions — use streaming writer
+        // Split into 4 child partitions — use streaming merge+write
         let child_level = level + 1;
         let mut writers: Vec<(i64, ArrowWriter<BufWriter<std::fs::File>>)> = Vec::new();
 
@@ -543,7 +502,7 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
             last.0 = i64::MAX;
         }
 
-        execute_merge_split(&plan, &runs, &schema, &mut writers)?;
+        merge_runs_split(&runs, &schema, &mut writers)?;
 
         for (_, writer) in writers {
             writer.close()?;
@@ -551,8 +510,8 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
 
         std::fs::File::create(format!("{}/.split", part_dir))?;
     } else {
-        // Non-split: collect merge into one big batch, single write call
-        let merged = collect_merge(&plan, &runs, total_rows);
+        // Non-split: fused merge into one big ColumnData, single write call
+        let merged = merge_runs(&runs, total_rows);
         drop(runs); // free input memory before writing
 
         let file = BufWriter::with_capacity(4 * 1024 * 1024, std::fs::File::create(&staging_path)?);
@@ -562,16 +521,14 @@ fn compact_partition(part: &u32, sources: &Vec<(PathBuf, usize, usize)>) -> anyh
     }
 
     let t_total = t0.elapsed();
-    let t_write = t_total - t_read - t_plan;
+    let t_merge_write = t_total - t_read;
     eprintln!(
-        "part {}: {} rows ({} runs, {} blocks), read {:.1}s, plan {:.1}s, write {:.1}s, total {:.1}s",
+        "part {}: {} rows ({} runs), read {:.1}s, merge+write {:.1}s, total {:.1}s",
         part,
         total_rows,
         num_runs,
-        num_blocks,
         t_read.as_secs_f64(),
-        t_plan.as_secs_f64(),
-        t_write.as_secs_f64(),
+        t_merge_write.as_secs_f64(),
         t_total.as_secs_f64(),
     );
 
