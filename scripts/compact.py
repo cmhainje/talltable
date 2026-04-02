@@ -138,6 +138,7 @@ def compact_partition(part, sources):
                 _pq_path,
                 compression="zstd",
                 compression_level=3,
+                use_dictionary=False,
                 sorting_columns=sorting_cols,
             )
 
@@ -151,6 +152,7 @@ def compact_partition(part, sources):
             staging_path,
             compression="zstd",
             compression_level=3,
+            use_dictionary=False,
             sorting_columns=sorting_cols,
         )
 
