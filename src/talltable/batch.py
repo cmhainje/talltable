@@ -165,8 +165,14 @@ class BatchWriter:
             data[k] = data[k][sort_idx]
 
         # compute partition boundary indices
+        # np.unique returns values sorted by partition ID, but data is sorted
+        # by hphigh, so partitions appear in hphigh order (not ID order).
+        # Re-sort by occurrence position so part_starts is monotonic.
         hppart = data["hppart"]
         part_ids, part_starts = np.unique(hppart, return_index=True)
+        order = np.argsort(part_starts)
+        part_ids = part_ids[order]
+        part_starts = part_starts[order]
         part_ends = np.empty_like(part_starts)
         part_ends[:-1] = part_starts[1:]
         part_ends[-1] = len(hppart)
