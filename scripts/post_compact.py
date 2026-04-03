@@ -63,12 +63,12 @@ def merge_image_parts():
     logger.info(f"merged into {IMAGE_DB_PATH} ({len(merged)} rows)")
 
 
-def delete_hdf5_chunks():
-    """Delete all HDF5 chunk files."""
-    chunks = list(PIXEL_DB_PATH.glob("chunk_*.hdf5"))
+def delete_bin_chunks():
+    """Delete all binary chunk files."""
+    chunks = list(PIXEL_DB_PATH.glob("chunk_*.bin"))
     for c in chunks:
         c.unlink()
-    logger.info(f"deleted {len(chunks)} HDF5 chunks")
+    logger.info(f"deleted {len(chunks)} binary chunks")
 
 
 def write_parts_list():
@@ -85,7 +85,7 @@ def main():
     promote_staging_files()
     cleanup_split_parents()
     merge_image_parts()
-    delete_hdf5_chunks()
+    delete_bin_chunks()
     write_parts_list()
 
 
