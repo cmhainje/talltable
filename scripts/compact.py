@@ -12,6 +12,7 @@ from talltable.batch import CHUNK_COLUMNS
 from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
 from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import PIXEL_DB_PATH
+from talltable.util import defer_interrupt
 
 
 task_id = int(os.environ.get("SLURM_PROCID", 0))
@@ -78,13 +79,19 @@ def read_partition_data(sources):
 
 def compact_partition(part, sources):
     """Compact a single partition. Called in a forked child process."""
-    import time as _time
-    t0 = _time.monotonic()
+    # import time as _time
+    # t0 = _time.monotonic()
 
     part_dir = PIXEL_DB_PATH / f"part={part}"
     part_dir.mkdir(exist_ok=True, parents=True)
     pq_path = part_dir / "compacted.parquet"
     staging_path = part_dir / "compacted_new.parquet"
+    split_marker = part_dir / ".split"
+
+    # skip if already processed in this round (resume after crash, or re-run)
+    if staging_path.exists() or split_marker.exists():
+        logger.info(f"part {part}: skipping (already processed in this round)")
+        return
 
     # read data from all sources
     tables = []
@@ -101,11 +108,11 @@ def compact_partition(part, sources):
             msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
             raise RuntimeError(msg)
 
-    t_read = _time.monotonic() - t0
+    # t_read = _time.monotonic() - t0
 
     table = pa.concat_tables(tables)
-    total_rows = len(table)
-    num_sources = len(sources) + (1 if pq_path.exists() else 0)
+    # total_rows = len(table)
+    # num_sources = len(sources) + (1 if pq_path.exists() else 0)
     del tables
 
     # sort
@@ -113,55 +120,62 @@ def compact_partition(part, sources):
     table = table.sort_by(sort_keys)
     sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
 
-    t_sort = _time.monotonic() - t0 - t_read
+    # t_sort = _time.monotonic() - t0 - t_read
 
     # check if it's too big
     level, index = part_to_level_index(part)
     if len(table) > MAX_ROWS_PER_PART and level < PART_MAX_LEVEL:
         # split into 4 subpartitions at the next level
         _level = level + 1
-        for k in range(4):
-            _index = (index << 2) + k
-            _p = level_index_to_part(_level, _index)
-            _part_dir = PIXEL_DB_PATH / f"part={_p}"
-            _part_dir.mkdir(exist_ok=True, parents=True)
+        with defer_interrupt():
+            for k in range(4):
+                _index = (index << 2) + k
+                _p = level_index_to_part(_level, _index)
+                _part_dir = PIXEL_DB_PATH / f"part={_p}"
+                _part_dir.mkdir(exist_ok=True, parents=True)
 
-            _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
-            _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
+                _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
+                _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
 
-            _mask = (pc.field("hphigh") >= _lo) & (pc.field("hphigh") < _hi)
-            _table = table.filter(_mask)
+                _mask = (pc.field("hphigh") >= _lo) & (pc.field("hphigh") < _hi)
+                _table = table.filter(_mask)
 
-            _pq_path = _part_dir / "compacted_new.parquet"
+                _pq_path = _part_dir / "compacted_new.parquet"
+                pq.write_table(
+                    _table,
+                    _pq_path,
+                    compression="zstd",
+                    compression_level=3,
+                    use_dictionary=False,
+                    sorting_columns=sorting_cols,
+                )
+
+            # delete parent's compacted.parquet now that all children are written;
+            # touch the .split marker LAST so its presence implies the children
+            # are complete (used as the resume marker on re-run).
+            pq_path.unlink(missing_ok=True)
+            split_marker.touch()
+
+    else:
+        with defer_interrupt():
             pq.write_table(
-                _table,
-                _pq_path,
+                table,
+                staging_path,
                 compression="zstd",
                 compression_level=3,
                 use_dictionary=False,
                 sorting_columns=sorting_cols,
             )
+            # free the old copy immediately to keep peak storage low; the new
+            # staging file is the resume marker for re-runs.
+            pq_path.unlink(missing_ok=True)
 
-        # write a marker so post_compact knows to clean up the parent
-        split_marker = part_dir / ".split"
-        split_marker.touch()
-
-    else:
-        pq.write_table(
-            table,
-            staging_path,
-            compression="zstd",
-            compression_level=3,
-            use_dictionary=False,
-            sorting_columns=sorting_cols,
-        )
-
-    t_total = _time.monotonic() - t0
-    t_write = t_total - t_read - t_sort
-    logger.info(
-        f"part {part}: {total_rows} rows ({num_sources} sources), "
-        f"read {t_read:.1f}s, sort {t_sort:.1f}s, write {t_write:.1f}s, total {t_total:.1f}s"
-    )
+    # t_total = _time.monotonic() - t0
+    # t_write = t_total - t_read - t_sort
+    # logger.info(
+    #     f"part {part}: {total_rows} rows ({num_sources} sources), "
+    #     f"read {t_read:.1f}s, sort {t_sort:.1f}s, write {t_write:.1f}s, total {t_total:.1f}s"
+    # )
 
 
 def main():
