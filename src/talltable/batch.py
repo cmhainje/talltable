@@ -1,4 +1,3 @@
-import h5py
 import healpy as hp
 import logging
 import numpy as np
@@ -22,6 +21,17 @@ logger = logging.getLogger(__name__)
 ALL_WAVEID = rowcoldet_to_waveid(ALL_ROW, ALL_COL, 0)
 
 PIXEL_COLUMNS = ["waveid", "flux", "variance", "zodi", "flags", "hphigh", "imageid", "hppart"]
+
+# Column order and dtypes for the binary chunk format.
+CHUNK_COLUMNS = [
+    ("flux",     np.float32),
+    ("variance", np.float32),
+    ("zodi",     np.float32),
+    ("flags",    np.int32),
+    ("hphigh",   np.int64),
+    ("waveid",   np.int32),
+    ("imageid",  np.int64),
+]
 
 
 @dataclass
@@ -146,31 +156,41 @@ class BatchWriter:
         for k, arr_list in self.pixel_buffer.items():
             data[k] = np.concatenate(arr_list)
 
-        # sort by hppart so data for the same partition is contiguous
-        sort_idx = np.argsort(data["hppart"], kind="mergesort")
+        # sort by hphigh; since active partitions tile the hphigh space without
+        # overlap, this also makes data for the same partition contiguous, AND
+        # leaves each partition's slice sorted by hphigh for efficient merging
+        # during compaction.
+        sort_idx = np.argsort(data["hphigh"], kind="mergesort")
         for k in data:
             data[k] = data[k][sort_idx]
 
         # compute partition boundary indices
+        # np.unique returns values sorted by partition ID, but data is sorted
+        # by hphigh, so partitions appear in hphigh order (not ID order).
+        # Re-sort by occurrence position so part_starts is monotonic.
         hppart = data["hppart"]
         part_ids, part_starts = np.unique(hppart, return_index=True)
+        order = np.argsort(part_starts)
+        part_ids = part_ids[order]
+        part_starts = part_starts[order]
         part_ends = np.empty_like(part_starts)
         part_ends[:-1] = part_starts[1:]
         part_ends[-1] = len(hppart)
 
-        # write to a single flat HDF5 file
+        # write to a single flat binary file
         PIXEL_DB_PATH.mkdir(exist_ok=True, parents=True)
-        path = PIXEL_DB_PATH / f"chunk_{suffix}.hdf5"
+        path = PIXEL_DB_PATH / f"chunk_{suffix}.bin"
 
-        with h5py.File(path, "w") as f:
-            for k, arr in data.items():
-                if k == "hppart":
-                    continue
-                f[k] = arr
-
-            f.attrs["part_ids"] = part_ids
-            f.attrs["part_starts"] = part_starts
-            f.attrs["part_ends"] = part_ends
+        with open(path, "wb") as f:
+            # header: partition index
+            np.array([len(part_ids)], dtype=np.uint32).tofile(f)
+            part_ids.astype(np.uint32).tofile(f)
+            part_starts.astype(np.uint64).tofile(f)
+            part_ends.astype(np.uint64).tofile(f)
+            np.array([len(hppart)], dtype=np.uint64).tofile(f)
+            # columns
+            for name, dtype in CHUNK_COLUMNS:
+                data[name].astype(dtype).tofile(f)
 
     def _write_images(self):
         IMAGE_PARTS_DIR.mkdir(exist_ok=True)
