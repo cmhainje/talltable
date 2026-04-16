@@ -85,7 +85,8 @@ def main(args):
     if num_tasks > 1:
         to_ingest = to_ingest[task_id::num_tasks]
 
-    logger.info("%d files to ingest", len(to_ingest))
+    if task_id == 0:
+        logger.info("%d files to ingest", len(to_ingest))
 
     if len(to_ingest) == 0:
         return

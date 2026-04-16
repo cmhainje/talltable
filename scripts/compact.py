@@ -51,7 +51,8 @@ def scan_chunk_files():
                 partition_index[pid] = []
             partition_index[pid].append((fpath, int(start), int(end)))
 
-    logger.info(f"scanned {len(bin_files)} chunk files, found {len(partition_index)} partitions")
+    if task_id == 0:
+        logger.info(f"scanned {len(bin_files)} chunk files, found {len(partition_index)} partitions")
     return partition_index
 
 
