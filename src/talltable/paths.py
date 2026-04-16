@@ -1,7 +1,8 @@
 from pathlib import Path
 
-DATA_DIR = Path("/mnt/sdceph/users/spherex/spherex_data_qr2")
-DB_DIR   = Path("/mnt/sdceph/users/spherex/talltable")
+DATA_DIR    = Path("/mnt/sdceph/users/spherex/spherex_data_qr2")
+DB_DIR      = Path("/mnt/sdceph/users/spherex/talltable")
+SCRATCH_DIR = Path("/mnt/sdceph/users/chainje/spxdb-scratch")
 
 PIXEL_DB_PATH = DB_DIR / "pixels"
 IMAGE_DB_PATH = DB_DIR / "image.parquet"

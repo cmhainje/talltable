@@ -11,7 +11,7 @@ from tqdm.contrib.logging import logging_redirect_tqdm
 from talltable.batch import CHUNK_COLUMNS
 from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
 from talltable.partition import part_to_level_index, level_index_to_part
-from talltable.paths import PIXEL_DB_PATH
+from talltable.paths import PIXEL_DB_PATH, SCRATCH_DIR
 from talltable.util import defer_interrupt
 
 
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 def scan_chunk_files():
     """Scan binary chunk files and build a partition -> [(file, start, end)] mapping."""
-    bin_files = sorted(PIXEL_DB_PATH.glob("chunk_*.bin"))
+    bin_files = sorted(SCRATCH_DIR.glob("chunk_*.bin"))
     partition_index = {}
 
     for fpath in bin_files:

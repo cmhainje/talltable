@@ -4,7 +4,7 @@ import pyarrow.parquet as pq
 
 from pathlib import Path
 
-from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR, PART_DB_PATH
+from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR, PART_DB_PATH, SCRATCH_DIR
 
 
 logging.basicConfig(
@@ -65,7 +65,7 @@ def merge_image_parts():
 
 def delete_bin_chunks():
     """Delete all binary chunk files."""
-    chunks = list(PIXEL_DB_PATH.glob("chunk_*.bin"))
+    chunks = list(SCRATCH_DIR.glob("chunk_*.bin"))
     for c in chunks:
         c.unlink()
     logger.info(f"deleted {len(chunks)} binary chunks")
