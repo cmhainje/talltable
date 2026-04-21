@@ -4,7 +4,6 @@ from .constants import PART_MIN_LEVEL, PART_MAX_LEVEL
 from .paths import DB_DIR
 
 
-
 def part_to_level_index(part):
     if isinstance(part, int):
         n = part.bit_length() - 1
@@ -22,17 +21,50 @@ def level_index_to_part(level, index):
     return index + (1 << (2 * (level + 4)))
 
 
-def find_partition(ra, dec):
-    part = level_index_to_part(
-        PART_MAX_LEVEL,
-        hp.ang2pix(2**PART_MAX_LEVEL, ra, dec, nest=True, lonlat=True),
+def find_partitions_ipix(ipix, level=PART_MAX_LEVEL, all_parts=None):
+    if all_parts is None:
+        with open(DB_DIR / "parts.txt", "r") as f:
+            all_parts = set(int(line.strip()) for line in f.readlines())
+
+    if level < PART_MAX_LEVEL:
+        raise ValueError(f"level must be >= {PART_MAX_LEVEL}")
+
+    ipix = np.atleast_1d(ipix)
+    if level > PART_MAX_LEVEL:
+        ipix = ipix >> (2 * (level - PART_MAX_LEVEL))
+
+    query_parts = level_index_to_part(PART_MAX_LEVEL, ipix)
+    query_parts = (
+        set(query_parts)
+        | set(query_parts >> 2)
+        | set(query_parts >> 4)
+        | set(query_parts >> 6)
+        | set(query_parts >> 8)
+    ) & all_parts
+
+    return query_parts
+
+
+def find_partitions_disc(ra, dec, radius, all_parts=None):
+    ipix = hp.query_disc(
+        2**PART_MAX_LEVEL,
+        hp.ang2vec(ra, dec, lonlat=True),
+        np.radians(radius),
+        nest=True,
+        inclusive=True,
     )
+    return find_partitions_ipix(ipix, PART_MAX_LEVEL, all_parts=all_parts)
 
-    for _ in range(PART_MAX_LEVEL - PART_MIN_LEVEL + 1):
-        if (DB_DIR / f"part={part}/compacted.parquet").exists():
-            break
-        part = part >> 2
-    else:
-        return None
 
-    return part
+def find_partitions_rect(ra, dec, width, height, all_parts=None):
+    ipix = hp.query_polygon(
+        2**PART_MAX_LEVEL,
+        hp.ang2vec(
+            ra + 0.5 * width * np.array([-1, +1, -1, +1]),
+            dec + 0.5 * height * np.array([-1, -1, +1, +1]),
+            lonlat=True,
+        ),
+        nest=True,
+        inclusive=True,
+    )
+    return find_partitions_ipix(ipix, PART_MAX_LEVEL, all_parts=all_parts)
