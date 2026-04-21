@@ -1,16 +1,20 @@
+import tomllib
 from pathlib import Path
 
-DATA_DIR    = Path("/mnt/sdceph/users/spherex/spherex_data_qr2")
-DB_DIR      = Path("/mnt/sdceph/users/spherex/talltable")
-SCRATCH_DIR = Path("/mnt/sdceph/users/chainje/spxdb-scratch")
+_config_path = Path(__file__).parent.parent.parent / "config.toml"
+with open(_config_path, "rb") as f:
+    _cfg = tomllib.load(f)["paths"]
 
-PIXEL_DB_PATH = DB_DIR / "pixels"
-IMAGE_DB_PATH = DB_DIR / "image.parquet"
-WAVES_DB_PATH = DB_DIR / "waves.parquet"
-EPHEM_DB_PATH = DB_DIR / "ephem.parquet"
+DATA_DIR    = Path(_cfg["data_dir"])
+DB_DIR      = Path(_cfg["db_dir"])
+SCRATCH_DIR = Path(_cfg["scratch_dir"])
+
+PIXEL_DB_PATH   = DB_DIR / "pixels"
+IMAGE_DB_PATH   = DB_DIR / "image.parquet"
+WAVES_DB_PATH   = DB_DIR / "waves.parquet"
+EPHEM_DB_PATH   = DB_DIR / "ephem.parquet"
 IMAGE_PARTS_DIR = DB_DIR / "image_parts"
-
-PART_DB_PATH = DB_DIR / "parts.txt"
+PART_DB_PATH    = DB_DIR / "parts.txt"
 
 
 def image_part_path(task_id: int) -> Path:
