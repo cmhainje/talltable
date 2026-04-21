@@ -1,0 +1,4 @@
+[paths]
+data_dir    = "~/data"
+db_dir      = "~/db"
+scratch_dir = "~/db"
