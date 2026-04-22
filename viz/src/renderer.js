@@ -24,9 +24,9 @@ uniform float      u_scale;           // pixels per radian
 uniform vec2       u_canvasSize;      // (width, height)
 uniform int        u_nside;           // 2^maplvl
 uniform int        u_order;           // maplvl
-uniform vec2       u_fluxRange;       // (m, white) — m = black point (≥0), white = 98th pct
-uniform float      u_alpha;           // arcsinh stretch: asinh(alpha*Q*(x-m)) / asinh(alpha*Q*(white-m))
-uniform float      u_Q;               // stretch nonlinearity (0 → linear, large → log-like)
+uniform float      u_m;               // black point: max(2nd pct, 0)
+uniform float      u_alpha;           // arcsinh stretch α
+uniform float      u_Q;               // stretch nonlinearity Q (0 → linear, large → log-like)
 uniform int        u_pixelCount;
 uniform int        u_indicesTexWidth; // = TEX_WIDTH
 uniform usampler2D u_indicesTex;      // R32UI: sorted mappix values
@@ -166,10 +166,8 @@ void main() {
     float flux = texelFetch(u_fluxesTex, fxy, 0).r;
 
     // ── 4. Arcsinh stretch + colormap ──
-    // fluxRange.x = m (black point, ≥ 0), fluxRange.y = white point (98th pct)
-    float x     = flux - u_fluxRange.x;
-    float scale = asinh(u_alpha * u_Q * max(u_fluxRange.y - u_fluxRange.x, 1e-30));
-    float t     = clamp(asinh(u_alpha * u_Q * x) / max(scale, 1e-30), 0.0, 1.0);
+    // t = clamp(asinh(α·Q·(flux − m)) / Q, 0, 1)
+    float t = clamp(asinh(u_alpha * u_Q * (flux - u_m)) / u_Q, 0.0, 1.0);
     outColor = vec4(texture(u_colormapTex, vec2(t, 0.5)).rgb, 1.0);
 }`;
 
@@ -238,7 +236,7 @@ export function init(canvas) {
   const uniformNames = [
     'u_centerRaDec', 'u_scale', 'u_canvasSize',
     'u_nside', 'u_order',
-    'u_fluxRange', 'u_alpha', 'u_Q',
+    'u_m', 'u_alpha', 'u_Q',
     'u_pixelCount', 'u_indicesTexWidth',
     'u_indicesTex', 'u_fluxesTex', 'u_colormapTex',
   ];
@@ -259,7 +257,7 @@ export function init(canvas) {
     indicesTex, fluxesTex, colormapTex,
     pixelCount: 0,
     texWidth:   TEX_WIDTH,
-    fluxRange:  [0, 1],
+    m: 0,
   };
 }
 
@@ -297,12 +295,9 @@ export function uploadPixels(ctx, mappix, flux) {
     sortedFlux[i] = flux[j];
   }
 
-  // Flux range: black point = max(2nd pct, 0), white point = 98th pct
+  // Black point: max(2nd percentile, 0)
   const tmp = Float32Array.from(sortedFlux).sort();
-  ctx.fluxRange = [
-    Math.max(d3.quantile(tmp, 0.02) ?? 0, 0),
-    d3.quantile(tmp, 0.98) ?? 1,
-  ];
+  ctx.m = Math.max(d3.quantile(tmp, 0.02) ?? 0, 0);
 
   // Pad to a full multiple of TEX_WIDTH rows
   const rows  = Math.ceil(n / TEX_WIDTH);
@@ -343,7 +338,7 @@ export function uploadPixels(ctx, mappix, flux) {
 export function render(ctx, ra, dec, scale, maplvl, alpha, Q) {
   const { gl, program, uniforms, vao,
           indicesTex, fluxesTex, colormapTex,
-          pixelCount, texWidth, fluxRange } = ctx;
+          pixelCount, texWidth, m } = ctx;
 
   const W = gl.canvas.width;
   const H = gl.canvas.height;
@@ -357,7 +352,7 @@ export function render(ctx, ra, dec, scale, maplvl, alpha, Q) {
   gl.uniform2f(uniforms.u_canvasSize,  W, H);
   gl.uniform1i(uniforms.u_nside,       1 << maplvl);
   gl.uniform1i(uniforms.u_order,       maplvl);
-  gl.uniform2f(uniforms.u_fluxRange,   fluxRange[0], fluxRange[1]);
+  gl.uniform1f(uniforms.u_m,           m);
   gl.uniform1f(uniforms.u_alpha,       alpha);
   gl.uniform1f(uniforms.u_Q,           Q);
   gl.uniform1i(uniforms.u_pixelCount,  pixelCount);
