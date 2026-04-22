@@ -8,3 +8,6 @@ db/
 data/
 docs-dist/
 
+viz/node_modules/
+viz/dist/
+

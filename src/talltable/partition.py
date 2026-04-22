@@ -60,7 +60,7 @@ def find_partitions_rect(ra, dec, width, height, all_parts=None):
     ipix = hp.query_polygon(
         2**PART_MAX_LEVEL,
         hp.ang2vec(
-            ra + 0.5 * width * np.array([-1, +1, -1, +1]),
+            ra + 0.5 * width * np.array([-1, +1, +1, -1]),
             dec + 0.5 * height * np.array([-1, -1, +1, +1]),
             lonlat=True,
         ),
@@ -68,3 +68,11 @@ def find_partitions_rect(ra, dec, width, height, all_parts=None):
         inclusive=True,
     )
     return find_partitions_ipix(ipix, PART_MAX_LEVEL, all_parts=all_parts)
+
+
+def find_partitions_ipix8(ipix8, all_parts=None):
+    """Find DB partitions overlapping the given level-8 HEALPix NESTED indices."""
+    ipix8 = np.atleast_1d(np.asarray(ipix8, dtype=np.int64))
+    # Each level-8 pixel has 4^2=16 level-10 children
+    ipix10 = ((ipix8[:, None] << 4) | np.arange(16, dtype=np.int64)).ravel()
+    return find_partitions_ipix(ipix10, level=PART_MAX_LEVEL, all_parts=all_parts)
