@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import * as d3 from 'd3';
   import { init, uploadPixels, render } from './renderer.js';
   import { TileCache } from './tilecache.js';
@@ -7,6 +7,7 @@
   let {
     ra = $bindable(), dec = $bindable(),
     wavemin, wavemax, maplvl,
+    alpha, Q,
     loading = $bindable(false),
     statusText = $bindable(''),
     errorMsg = $bindable(null),
@@ -24,6 +25,18 @@
 
   let rendCtx = null;
 
+  // When ra/dec are changed externally (e.g. Go button), push into view state.
+  // untrack prevents subscribing to viewRa/viewDec so this doesn't fire during pan.
+  $effect(() => {
+    const newRa = ra, newDec = dec;
+    if (newRa !== untrack(() => viewRa) || newDec !== untrack(() => viewDec)) {
+      viewRa = newRa;
+      viewDec = newDec;
+      redraw();
+      sendRequest();
+    }
+  });
+
   // ── Tile cache ─────────────────────────────────────────────────────────────
 
   const cache = new TileCache();
@@ -36,7 +49,7 @@
 
   function redraw() {
     if (!rendCtx) return;
-    render(rendCtx, viewRa, viewDec, viewScale, maplvl);
+    render(rendCtx, viewRa, viewDec, viewScale, maplvl, alpha, Q);
     updateGraticule();
     updateScaleBar();
   }
@@ -83,6 +96,7 @@
     if (!svgEl) return;
     const proj = d3.geoGnomonic()
       .rotate([-viewRa, -viewDec])
+      .reflectX(true)
       .scale(viewScale)
       .translate([canvasEl.width / 2, canvasEl.height / 2])
       .clipAngle(60);
@@ -364,6 +378,12 @@
     scheduleFetch();
   });
 
+  // Stretch params only need a redraw — no new data required
+  $effect(() => {
+    void alpha; void Q;
+    redraw();
+  });
+
   // ── Mount ──────────────────────────────────────────────────────────────────
 
   onMount(() => {
@@ -399,6 +419,7 @@
         baseScale = viewScale;
         baseProj  = d3.geoGnomonic()
           .rotate([-baseRa, -baseDec])
+          .reflectX(true)
           .scale(baseScale)
           .translate([canvasEl.width / 2, canvasEl.height / 2])
           .clipAngle(60);

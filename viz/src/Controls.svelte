@@ -5,6 +5,8 @@
     wavemin = $bindable(1.85),
     wavemax = $bindable(1.9),
     maplvl = $bindable(6),
+    alpha = $bindable(1.0),
+    Q = $bindable(5.0),
     loading   = false,
     statusText = '',
     errorMsg  = null,
@@ -106,6 +108,20 @@
         <input type="number" name="waveRange" id="" bind:value={waveRange} />
       </div>
       <label for="waverange" class="hint">Range [µm]</label>
+    </section>
+
+    <section>
+      <span class="label">Arcsinh stretch</span>
+      <div class="row">
+        <input type="range" min="0.1" max="10" step="0.1" bind:value={alpha} name="alpha" />
+        <input type="number" bind:value={alpha} name="alphaNum" />
+      </div>
+      <label for="alpha" class="hint">α (brightness)</label>
+      <div class="row">
+        <input type="range" min="0.1" max="20" step="0.1" bind:value={Q} name="Q" />
+        <input type="number" bind:value={Q} name="QNum" />
+      </div>
+      <label for="Q" class="hint">Q (nonlinearity; 0 → linear)</label>
     </section>
 
     <section>

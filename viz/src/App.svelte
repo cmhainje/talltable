@@ -7,6 +7,8 @@
   let wavemin = $state(1.85);
   let wavemax = $state(1.90);
   let maplvl = $state(12);
+  let alpha  = $state(1.0);
+  let Q      = $state(5.0);
 
   let loading   = $state(false);
   let statusText = $state('');
@@ -14,9 +16,9 @@
 </script>
 
 <div class="app">
-  <Map bind:ra bind:dec {wavemin} {wavemax} {maplvl}
+  <Map bind:ra bind:dec {wavemin} {wavemax} {maplvl} {alpha} {Q}
        bind:loading bind:statusText bind:errorMsg />
-  <Controls bind:ra bind:dec bind:wavemin bind:wavemax bind:maplvl
+  <Controls bind:ra bind:dec bind:wavemin bind:wavemax bind:maplvl bind:alpha bind:Q
             {loading} {statusText} {errorMsg} />
 </div>
 
