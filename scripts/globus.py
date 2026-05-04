@@ -64,21 +64,29 @@ def is_valid_float(s):
         return False
 
 
-def handle_disc(args):
-    kw = dict(ra=args.ra, dec=args.dec, frame="icrs")
-    if is_valid_float(args.ra):
-        kw['unit'] = 'deg'
+def to_coord(args):
+    try:
+        return SkyCoord(
+            ra=float(args.ra),
+            dec=float(args.dec),
+            frame="icrs",
+            unit="deg",
+        )
+    except (ValueError, TypeError):
+        return SkyCoord(
+            ra=args.ra,
+            dec=args.dec,
+            frame="icrs",
+        )
 
-    x = SkyCoord(**kw)
+
+def handle_disc(args):
+    x = to_coord(args)
     return find_partitions_disc(x.ra.deg, x.dec.deg, args.radius)
 
 
 def handle_rect(args):
-    kw = dict(ra=args.ra, dec=args.dec, frame="icrs")
-    if is_valid_float(args.ra):
-        kw['unit'] = 'deg'
-
-    x = SkyCoord(**kw)
+    x = to_coord(args)
     return find_partitions_rect(x.ra.deg, x.dec.deg, args.width, args.height)
 
 
@@ -166,8 +174,11 @@ if __name__ == "__main__":
     headers = get_headers()
     print("login successful!")
 
+    # make directories
+    (DB_DIR / "pixels").mkdir(parents=True, exist_ok=True)
+
     # copy over the auxilliary dbs (do this every time)
-    download_file("parts.txt", PART_DB_PATH, headers)
+    download_file("parts.txt",     PART_DB_PATH,  headers)
     download_file("image.parquet", IMAGE_DB_PATH, headers)
     download_file("waves.parquet", WAVES_DB_PATH, headers)
     print("downloaded partition, image, and wavelength tables")
