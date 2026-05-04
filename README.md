@@ -7,7 +7,7 @@
 
 ## documentation
 
-see [https://connorhainje.com/talltable](connorhainje.com/talltable)
+see [connorhainje.com/talltable](https://connorhainje.com/talltable)
 
 ## installation
 
