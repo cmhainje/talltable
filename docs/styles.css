@@ -30,14 +30,14 @@ pre, code {
     font-size: 0.85rem;
 }
 
-pre, p code {
+pre, p code, li code {
     background-color: var(--code-bg);
     border: 1px solid var(--accent-gray);
     border-radius: 4px;
 }
 
-p code {
-    padding: 2px 4px;
+p code, li code {
+    padding: 0.5px 4px;
     margin: -2px 0px;
 }
 
@@ -88,10 +88,10 @@ summary::before {
     color: var(--accent-gray);
     font-size: 0.625rem;
     position: absolute;
-    left: -1.25rem;
+    left: -1rem;
 }
 
-details[open] summary::before {
+details[open] > summary::before {
     content: "▼";
 }
 
