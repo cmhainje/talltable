@@ -26,23 +26,24 @@ def find_partitions_ipix(ipix, level=PART_MAX_LEVEL, all_parts=None):
         with open(DB_DIR / "parts.txt", "r") as f:
             all_parts = set(int(line.strip()) for line in f.readlines())
 
-    if level < PART_MAX_LEVEL:
-        raise ValueError(f"level must be >= {PART_MAX_LEVEL}")
-
     ipix = np.atleast_1d(ipix)
+
+    if level < PART_MAX_LEVEL:
+        ipix = (
+            ipix[:, None] << (2 * (PART_MAX_LEVEL - level))
+            | np.arange(4 ** (PART_MAX_LEVEL - level))[None, :]
+        ).ravel()
+
     if level > PART_MAX_LEVEL:
         ipix = ipix >> (2 * (level - PART_MAX_LEVEL))
 
     query_parts = level_index_to_part(PART_MAX_LEVEL, ipix)
-    query_parts = (
-        set(query_parts)
-        | set(query_parts >> 2)
-        | set(query_parts >> 4)
-        | set(query_parts >> 6)
-        | set(query_parts >> 8)
-    ) & all_parts
 
-    return query_parts
+    query_set = set(query_parts)
+    for i in range(1, PART_MAX_LEVEL - PART_MIN_LEVEL + 1):
+        query_set = query_set | set(query_parts >> 2 * i)
+
+    return query_set & all_parts
 
 
 def find_partitions_disc(ra, dec, radius, all_parts=None):
