@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+import pyarrow as pa
+
+from pathlib import Path
+
+from talltable.constants import HP_HIGH_LEVEL, SERVICE_URL
+from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix
+from talltable.paths import PART_DB_PATH, PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
+
+
+_KNOWN_SOURCE_BIT = 1 << 21  # bit 21: pixel is near a known source (scientifically ok)
+
+
+class PixelQuery:
+    def __init__(self, web: bool = False, base_url: str = SERVICE_URL):
+        self._web = web
+        self._base_url = base_url.rstrip("/")
+        self._region = None
+        self._wavelength = None
+        self._flags_sql = f"(flags & ~({_KNOWN_SOURCE_BIT})) = 0"
+        self._with_rowcoldet = False
+        self._with_image = False
+        self._with_radec = False
+
+    # --- region ---
+
+    def disc(self, ra: float, dec: float, radius: float) -> PixelQuery:
+        """Circular region on sky. ra/dec in degrees, radius in degrees."""
+        self._region = ("disc", ra, dec, radius)
+        return self
+
+    def rect(self, ra: float, dec: float, width: float, height: float) -> PixelQuery:
+        """Rectangular region on sky. ra/dec is center, width/height in degrees."""
+        self._region = ("rect", ra, dec, width, height)
+        return self
+
+    def ipix(self, indices: list[int], level: int) -> PixelQuery:
+        """Specific HEALPix pixels at the given nesting level."""
+        self._region = ("ipix", indices, level)
+        return self
+
+    # --- filters ---
+
+    def wavelength(self, min_um: float, max_um: float) -> PixelQuery:
+        """Filter to pixels whose center wavelength falls within [min_um, max_um] microns."""
+        self._wavelength = (min_um, max_um)
+        return self
+
+    def flags(
+        self,
+        *,
+        mask_known_source: bool = False,
+        custom_mask: int | None = None,
+    ) -> PixelQuery:
+        """
+        Control flag filtering.
+
+        Default (no args): accept pixels where no bits other than bit 21 are set,
+            i.e. flags & ~(1<<21) == 0.
+        mask_known_source=True: also require bit 21 to be clear, i.e. flags == 0.
+        custom_mask=M: accept pixels where flags & M == 0 (overrides the above).
+        """
+        if mask_known_source and custom_mask is not None:
+            raise ValueError("mask_known_source and custom_mask are mutually exclusive")
+        if custom_mask is not None:
+            self._flags_sql = f"(flags & {custom_mask}) = 0"
+        elif mask_known_source:
+            self._flags_sql = "flags = 0"
+        else:
+            self._flags_sql = f"(flags & ~({_KNOWN_SOURCE_BIT})) = 0"
+        return self
+
+    # --- extra columns ---
+
+    def with_rowcoldet(self) -> PixelQuery:
+        """Add col, row, det columns decoded from waveid."""
+        self._with_rowcoldet = True
+        return self
+
+    def with_image(self) -> PixelQuery:
+        """Join against the images table to include filepath for each pixel."""
+        self._with_image = True
+        return self
+
+    def with_radec(self) -> PixelQuery:
+        """Add ra, dec columns computed from hphigh (applied client-side after execute)."""
+        self._with_radec = True
+        return self
+
+    # --- partitions ---
+
+    def partitions(self) -> list[int]:
+        """Return the list of partition indices covering the requested region."""
+        if self._region is None:
+            raise ValueError("Region must be specified before calling partitions()")
+        if self._web:
+            return self._web_partitions()
+        else:
+            return self._local_partitions()
+
+    def _local_partitions(self) -> list[int]:
+        with open(PART_DB_PATH) as f:
+            all_parts = set(int(line.strip()) for line in f)
+        kind = self._region[0]
+        if kind == "disc":
+            _, ra, dec, radius = self._region
+            parts = find_partitions_disc(ra, dec, radius, all_parts=all_parts)
+        elif kind == "rect":
+            _, ra, dec, width, height = self._region
+            parts = find_partitions_rect(ra, dec, width, height, all_parts=all_parts)
+        elif kind == "ipix":
+            _, indices, level = self._region
+            parts = find_partitions_ipix(indices, level, all_parts=all_parts)
+        else:
+            raise ValueError(f"Unknown region type: {kind}")
+        return sorted(map(int, parts))
+
+    def _web_partitions(self) -> list[int]:
+        import requests
+        kind = self._region[0]
+        if kind == "disc":
+            _, ra, dec, radius = self._region
+            resp = requests.get(
+                f"{self._base_url}/partitions/disc",
+                params={"ra": ra, "dec": dec, "radius": radius},
+            )
+        elif kind == "rect":
+            _, ra, dec, width, height = self._region
+            resp = requests.get(
+                f"{self._base_url}/partitions/rect",
+                params={"ra": ra, "dec": dec, "width": width, "height": height},
+            )
+        elif kind == "ipix":
+            _, indices, level = self._region
+            resp = requests.post(
+                f"{self._base_url}/partitions",
+                json={"level": level, "indices": indices},
+            )
+        else:
+            raise ValueError(f"Unknown region type: {kind}")
+        resp.raise_for_status()
+        return sorted(resp.json()["partitions"])
+
+    # --- SQL ---
+
+    def sql(self) -> str:
+        """Return the SQL query string."""
+        if self._region is None:
+            raise ValueError("Region must be specified before calling sql()")
+        return self._build_sql("pixels", "waves", "images")
+
+    def _local_sql(self, parts: list[int]) -> str:
+        paths = [f"'{PIXEL_DB_PATH / f'part={p}/compacted.parquet'}'" for p in parts]
+        if len(paths) == 1:
+            pixel_source = f"read_parquet({paths[0]})"
+        else:
+            pixel_source = f"read_parquet([{', '.join(paths)}])"
+        waves_source = f"read_parquet('{WAVES_DB_PATH}')"
+        images_source = f"read_parquet('{IMAGE_DB_PATH}')"
+        return self._build_sql(pixel_source, waves_source, images_source)
+
+    def _build_sql(self, pixel_source: str, waves_source: str, images_source: str) -> str:
+        # SELECT columns
+        cols = [
+            "p.waveid", "p.flux", "p.variance", "p.zodi",
+            "p.flags", "p.hphigh", "p.imageid",
+        ]
+        if self._with_rowcoldet:
+            cols += [
+                "(p.waveid & 2047) AS col",
+                "((p.waveid >> 12) & 2047) AS row",
+                "((p.waveid >> 24) & 7) AS det",
+            ]
+        if self._with_image:
+            cols.append("i.filepath")
+
+        select = "SELECT\n    " + ",\n    ".join(cols)
+
+        # CTE for wavelength pre-filter
+        cte = None
+        if self._wavelength is not None:
+            min_um, max_um = self._wavelength
+            cte = (
+                f"WITH selected_waves AS (\n"
+                f"    SELECT * FROM {waves_source}"
+                f" WHERE wavelength BETWEEN {min_um} AND {max_um}\n"
+                f")"
+            )
+
+        # FROM + JOINs
+        froms = [f"FROM {pixel_source} p"]
+        if self._wavelength is not None:
+            froms.append("JOIN selected_waves w ON p.waveid = w.waveid")
+        if self._with_image:
+            froms.append(f"LEFT JOIN {images_source} i ON p.imageid = i.imageid")
+
+        # WHERE conditions
+        conditions = []
+        kind = self._region[0]
+        if kind == "ipix":
+            _, indices, level = self._region
+            in_list = ", ".join(str(i) for i in indices)
+            if level == HP_HIGH_LEVEL:
+                conditions.append(f"p.hphigh IN ({in_list})")
+            else:
+                shift = 2 * (HP_HIGH_LEVEL - level)
+                conditions.append(f"(p.hphigh >> {shift}) IN ({in_list})")
+        # disc/rect: partition selection covers the region; no per-pixel hphigh filter needed
+
+        conditions.append(self._flags_sql)
+        where = "WHERE " + "\n  AND ".join(conditions)
+
+        parts = []
+        if cte is not None:
+            parts.append(cte)
+        parts += [select] + froms + [where]
+        return "\n".join(parts)
+
+    # --- execute ---
+
+    def execute(self) -> pa.Table:
+        """Run the query and return an Arrow Table."""
+        parts = self.partitions()
+        if self._web:
+            from talltable.client import fetch_arrow_stream
+            table = fetch_arrow_stream(
+                f"{self._base_url}/sql",
+                {"query": self.sql(), "partitions": parts},
+            )
+        else:
+            import duckdb
+            con = duckdb.connect()
+            try:
+                table = con.execute(self._local_sql(parts)).fetch_arrow_table()
+            finally:
+                con.close()
+
+        if self._with_radec:
+            table = _add_radec(table)
+        return table
+
+    def execute_to_parquet(self, output: str | Path) -> None:
+        """Run the query and stream the result directly to a Parquet file."""
+        if self._with_radec:
+            raise ValueError(
+                "with_radec() is not supported with execute_to_parquet(); "
+                "use execute() instead and write the table manually."
+            )
+        parts = self.partitions()
+        if self._web:
+            from talltable.client import fetch_arrow_to_parquet
+            fetch_arrow_to_parquet(
+                f"{self._base_url}/sql",
+                {"query": self.sql(), "partitions": parts},
+                output,
+            )
+        else:
+            import duckdb
+            import pyarrow.parquet as pq
+            con = duckdb.connect()
+            try:
+                reader = con.execute(self._local_sql(parts)).fetch_record_batch(10_000)
+                writer = None
+                try:
+                    for batch in reader:
+                        if writer is None:
+                            writer = pq.ParquetWriter(output, batch.schema)
+                        writer.write_batch(batch)
+                finally:
+                    if writer:
+                        writer.close()
+            finally:
+                con.close()
+
+
+def _add_radec(table: pa.Table) -> pa.Table:
+    import healpy as hp
+    import numpy as np
+    nside = 2 ** HP_HIGH_LEVEL
+    ipix = table["hphigh"].to_pylist()
+    theta, phi = hp.pix2ang(nside, ipix, nest=True)
+    ra = np.degrees(phi)
+    dec = 90.0 - np.degrees(theta)
+    return (
+        table
+        .append_column("ra", pa.array(ra, type=pa.float64()))
+        .append_column("dec", pa.array(dec, type=pa.float64()))
+    )
