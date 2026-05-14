@@ -1,15 +1,101 @@
 from __future__ import annotations
 
+import healpy as hp
+import numpy as np
 import pyarrow as pa
 
 from pathlib import Path
 
-from talltable.constants import HP_HIGH_LEVEL, SERVICE_URL
+from talltable.constants import HP_HIGH_LEVEL, PART_MAX_LEVEL, SERVICE_URL
 from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix
 from talltable.paths import PART_DB_PATH, PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
 
 
-_KNOWN_SOURCE_BIT = 1 << 21  # bit 21: pixel is near a known source (scientifically ok)
+_KNOWN_SOURCE_BIT = 1 << 21  # bit 21: pixel is near a known source
+
+_MAX_FILTER_RANGES = 500
+_FILTER_TARGET_PIXELS = 1000
+
+
+def _choose_filter_level(region) -> int:
+    """Choose HEALPix level L so the region spans ~_FILTER_TARGET_PIXELS pixels."""
+    kind = region[0]
+    if kind == "disc":
+        _, ra, dec, radius_deg = region
+        area = np.pi * np.radians(radius_deg) ** 2
+    elif kind == "rect":
+        _, ra, dec, width_deg, height_deg = region
+        area = np.radians(width_deg) * np.radians(height_deg)
+    else:
+        return HP_HIGH_LEVEL
+    # N_pix ≈ 3 * area_rad² * 4^L  →  4^L = TARGET*π / (3*area)
+    nside_sq = _FILTER_TARGET_PIXELS * np.pi / (3.0 * area)
+    L = round(np.log2(nside_sq) / 2)
+    return max(PART_MAX_LEVEL, min(HP_HIGH_LEVEL, L))
+
+
+def _indices_to_hphigh_ranges(ipix_L: np.ndarray, shift: int) -> list[tuple[int, int]]:
+    """Convert sorted level-L pixel indices to merged hphigh (lo, hi) inclusive ranges."""
+    ipix_L = np.sort(np.unique(ipix_L)).astype(np.int64)
+    if len(ipix_L) == 0:
+        return []
+    los = ipix_L << shift
+    his = ((ipix_L + 1) << shift) - 1
+    ranges: list[tuple[int, int]] = []
+    cur_lo, cur_hi = int(los[0]), int(his[0])
+    for lo, hi in zip(los[1:], his[1:]):
+        lo, hi = int(lo), int(hi)
+        if lo <= cur_hi + 1:
+            cur_hi = max(cur_hi, hi)
+        else:
+            ranges.append((cur_lo, cur_hi))
+            cur_lo, cur_hi = lo, hi
+    ranges.append((cur_lo, cur_hi))
+    return ranges
+
+
+def _ipix_hphigh_ranges(indices, level: int) -> list[tuple[int, int]]:
+    """Convert user-supplied HEALPix indices at the given level to hphigh ranges."""
+    shift = 2 * (HP_HIGH_LEVEL - level)
+    return _indices_to_hphigh_ranges(np.asarray(indices, dtype=np.int64), shift)
+
+
+def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
+    """
+    Compute hphigh (lo, hi) inclusive ranges that cover the region.
+
+    Chooses a filter HEALPix level L so the region spans ~1000 pixels, queries
+    those pixels with inclusive=True, then converts each contiguous run of
+    level-L indices to a single BETWEEN range in hphigh space (nested HEALPix
+    guarantees index i at level L occupies exactly hphigh in
+    [i<<shift, (i+1)<<shift - 1]).
+
+    Returns None when the range count exceeds _MAX_FILTER_RANGES, meaning the
+    region is large enough that partition selection is already a sufficient
+    approximation and adding a filter would generate unwieldy SQL.
+    """
+    level = _choose_filter_level(region)
+    nside = 2 ** level
+    shift = 2 * (HP_HIGH_LEVEL - level)
+
+    kind = region[0]
+    if kind == "disc":
+        _, ra, dec, radius_deg = region
+        ipix_L = hp.query_disc(
+            nside, hp.ang2vec(ra, dec, lonlat=True),
+            np.radians(radius_deg), nest=True, inclusive=True,
+        )
+    else:  # rect
+        _, ra, dec, width_deg, height_deg = region
+        corners = hp.ang2vec(
+            ra + 0.5 * width_deg * np.array([-1, +1, +1, -1]),
+            dec + 0.5 * height_deg * np.array([-1, -1, +1, +1]),
+            lonlat=True,
+        )
+        ipix_L = hp.query_polygon(nside, corners, nest=True, inclusive=True)
+
+    ranges = _indices_to_hphigh_ranges(ipix_L, shift)
+    return ranges if len(ranges) <= _MAX_FILTER_RANGES else None
 
 
 class PixelQuery:
@@ -200,16 +286,36 @@ class PixelQuery:
         kind = self._region[0]
         if kind == "ipix":
             _, indices, level = self._region
-            in_list = ", ".join(str(i) for i in indices)
-            if level == HP_HIGH_LEVEL:
-                conditions.append(f"p.hphigh IN ({in_list})")
-            else:
-                shift = 2 * (HP_HIGH_LEVEL - level)
-                conditions.append(f"(p.hphigh >> {shift}) IN ({in_list})")
-        # disc/rect: partition selection covers the region; no per-pixel hphigh filter needed
+            ranges = _ipix_hphigh_ranges(indices, level)
+            comment = f"-- ipix, level {level}"
+            clauses = [f"(p.hphigh BETWEEN {lo} AND {hi})" for lo, hi in ranges]
+            body = clauses[0] if len(clauses) == 1 else "(\n    " + "\n    OR ".join(clauses) + "\n  )"
+            conditions.append(comment + "\n  " + body)
+        elif kind in ("disc", "rect"):
+            ranges = _disc_rect_hphigh_ranges(self._region)
+            if ranges:
+                filter_level = _choose_filter_level(self._region)
+                if kind == "disc":
+                    _, ra, dec, radius = self._region
+                    comment = f"-- disc(ra={ra}, dec={dec}, radius={radius}°), level-{filter_level} hphigh ranges"
+                else:
+                    _, ra, dec, width, height = self._region
+                    comment = f"-- rect(ra={ra}, dec={dec}, width={width}°, height={height}°), level-{filter_level} hphigh ranges"
+                clauses = [f"(p.hphigh BETWEEN {lo} AND {hi})" for lo, hi in ranges]
+                body = clauses[0] if len(clauses) == 1 else "(\n    " + "\n    OR ".join(clauses) + "\n  )"
+                conditions.append(comment + "\n  " + body)
 
-        conditions.append(self._flags_sql)
-        where = "WHERE " + "\n  AND ".join(conditions)
+        conditions.append(f"-- quality flags\n  {self._flags_sql}")
+
+        where_lines = ["WHERE"]
+        for i, cond in enumerate(conditions):
+            if cond.startswith("--"):
+                comment, expr = cond.split("\n  ", 1)
+                where_lines.append(f"  {comment}")
+                where_lines.append(f"  AND {expr}" if i > 0 else f"  {expr}")
+            else:
+                where_lines.append(f"  AND {cond}" if i > 0 else f"  {cond}")
+        where = "\n".join(where_lines)
 
         parts = []
         if cte is not None:
@@ -275,13 +381,9 @@ class PixelQuery:
 
 
 def _add_radec(table: pa.Table) -> pa.Table:
-    import healpy as hp
-    import numpy as np
     nside = 2 ** HP_HIGH_LEVEL
     ipix = table["hphigh"].to_pylist()
-    theta, phi = hp.pix2ang(nside, ipix, nest=True)
-    ra = np.degrees(phi)
-    dec = 90.0 - np.degrees(theta)
+    ra, dec = hp.pix2ang(nside, ipix, nest=True, lonlat=True)
     return (
         table
         .append_column("ra", pa.array(ra, type=pa.float64()))
