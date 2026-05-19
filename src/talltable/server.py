@@ -4,6 +4,8 @@ import io
 import json
 import os
 import pyarrow.ipc as ipc
+import queue as tqueue
+import shutil
 import struct
 import tempfile
 
@@ -285,33 +287,6 @@ async def sql_json(req: SQLRequest):
     )
 
 
-async def tmpfile_parquet_stream(sql: str, con: duckdb.DuckDBPyConnection):
-    loop = asyncio.get_event_loop()
-
-    # TemporaryDirectory() calls mkdtemp() internally, so tmpdir is unique per request.
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out_path = os.path.join(tmpdir, "result.parquet")
-
-        write_future = loop.run_in_executor(
-            executor,
-            lambda: con.execute(f"COPY ({sql}) TO '{out_path}' (FORMAT PARQUET)"),
-        )
-        try:
-            await asyncio.wait_for(asyncio.shield(write_future), timeout=TIMEOUT_SEC)
-        except TimeoutError:
-            con.interrupt()
-            await write_future
-            raise HTTPException(status_code=504, detail="Query timed out")
-        except duckdb.Error as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        finally:
-            con.close()
-
-        with open(out_path, "rb") as f:
-            while chunk := f.read(256 * 1024):
-                yield chunk
-
-
 @app.post("/sql.tmpfile")
 async def sql_tmpfile(req: SQLRequest):
     con = get_con()
@@ -320,9 +295,134 @@ async def sql_tmpfile(req: SQLRequest):
         paths = [PIXEL_DB_PATH / f"part={p}/compacted.parquet" for p in req.partitions]
         await prefetch_files(paths)
 
+    tmpdir = tempfile.mkdtemp()
+    out_path = os.path.join(tmpdir, "result.arrow")
+    sql = req.into_sql()
+    loop = asyncio.get_event_loop()
+
+    def do_write():
+        reader = con.execute(sql).fetch_record_batch(1_000_000)
+        try:
+            with ipc.new_file(out_path, reader.schema) as writer:
+                for batch in reader:
+                    writer.write_batch(batch)
+        finally:
+            con.close()
+
+    try:
+        await asyncio.wait_for(
+            loop.run_in_executor(executor, do_write),
+            timeout=TIMEOUT_SEC,
+        )
+    except TimeoutError:
+        con.interrupt()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(status_code=504, detail="Query timed out")
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
     return StreamingResponse(
-        tmpfile_parquet_stream(req.into_sql(), con),
+        _stream_file(out_path, tmpdir),
         media_type="application/octet-stream",
+    )
+
+
+async def _stream_file(path: str, tmpdir: str):
+    loop = asyncio.get_event_loop()
+    try:
+        with open(path, "rb") as f:
+            while chunk := await loop.run_in_executor(executor, f.read, 32 * 1024 * 1024):
+                yield chunk
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class _QueueSink(io.RawIOBase):
+    """IO sink that accumulates writes per batch and flushes each as a single queue item."""
+
+    def __init__(self, q: tqueue.SimpleQueue):
+        self._q = q
+        self._buf = io.BytesIO()
+        self._pos = 0  # monotonically increasing; never reset, so tell() stays valid
+
+    def write(self, data):
+        n = len(data)
+        self._buf.write(data)
+        self._pos += n
+        return n
+
+    def tell(self):
+        return self._pos
+
+    def flush_batch(self):
+        data = self._buf.getvalue()
+        if data:
+            self._q.put(data)
+        self._buf.seek(0)
+        self._buf.truncate(0)
+
+    def writable(self):
+        return True
+
+
+def _ipc_produce(sql: str, con: duckdb.DuckDBPyConnection,
+                 q: tqueue.SimpleQueue, done: object):
+    sink = _QueueSink(q)
+    try:
+        reader = con.execute(sql).fetch_record_batch(1_000_000)
+        with ipc.new_stream(sink, reader.schema) as writer:
+            sink.flush_batch()          # schema message
+            for batch in reader:
+                writer.write_batch(batch)
+                sink.flush_batch()      # one chunk per batch
+        sink.flush_batch()              # EOS marker
+    except Exception as e:
+        q.put(e)
+    finally:
+        con.close()
+        q.put(done)
+
+
+async def ipc_stream(sql: str, con: duckdb.DuckDBPyConnection):
+    loop = asyncio.get_event_loop()
+    q: tqueue.SimpleQueue = tqueue.SimpleQueue()
+    _DONE = object()
+
+    executor.submit(_ipc_produce, sql, con, q, _DONE)
+
+    deadline = loop.time() + TIMEOUT_SEC
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            con.interrupt()
+            raise HTTPException(status_code=504, detail="Query timed out")
+        try:
+            item = await asyncio.wait_for(
+                loop.run_in_executor(executor, q.get),
+                timeout=remaining,
+            )
+        except TimeoutError:
+            con.interrupt()
+            raise HTTPException(status_code=504, detail="Query timed out")
+        if item is _DONE:
+            break
+        if isinstance(item, Exception):
+            raise HTTPException(status_code=500, detail=str(item))
+        yield item
+
+
+@app.post("/sql.ipc")
+async def sql_ipc(req: SQLRequest):
+    con = get_con()
+
+    if req.partitions is not None:
+        paths = [PIXEL_DB_PATH / f"part={p}/compacted.parquet" for p in req.partitions]
+        await prefetch_files(paths)
+
+    return StreamingResponse(
+        ipc_stream(req.into_sql(), con),
+        media_type="application/vnd.apache.arrow.stream",
     )
 
 
