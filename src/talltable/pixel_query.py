@@ -108,6 +108,7 @@ class PixelQuery:
         self._with_rowcoldet = False
         self._with_image = False
         self._with_radec = False
+        self._with_wavelengths = False
 
     # --- region ---
 
@@ -172,6 +173,11 @@ class PixelQuery:
     def with_radec(self) -> PixelQuery:
         """Add ra, dec columns computed from hphigh (applied client-side after execute)."""
         self._with_radec = True
+        return self
+
+    def with_wavelengths(self) -> PixelQuery:
+        """Join against the waves table to include wavelength and bandwidth for each pixel."""
+        self._with_wavelengths = True
         return self
 
     # --- partitions ---
@@ -258,6 +264,8 @@ class PixelQuery:
                 "((p.waveid >> 12) & 2047) AS row",
                 "((p.waveid >> 24) & 7) AS det",
             ]
+        if self._with_wavelengths:
+            cols += ["w.wavelength", "w.bandwidth"]
         if self._with_image:
             cols.append("i.filepath")
 
@@ -278,6 +286,8 @@ class PixelQuery:
         froms = [f"FROM {pixel_source} p"]
         if self._wavelength is not None:
             froms.append("JOIN selected_waves w ON p.waveid = w.waveid")
+        elif self._with_wavelengths:
+            froms.append(f"JOIN {waves_source} w ON p.waveid = w.waveid")
         if self._with_image:
             froms.append(f"LEFT JOIN {images_source} i ON p.imageid = i.imageid")
 
