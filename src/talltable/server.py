@@ -78,8 +78,8 @@ def get_con():
         TMP_DB_PATH,
         read_only=True,
         config={
-            "threads": int(os.environ.get("DUCKDB_THREADS", 4)),
-            "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "6GB"),
+            "threads": int(os.environ.get("DUCKDB_THREADS", 16)),
+            "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "16GB"),
         },
     )
 
