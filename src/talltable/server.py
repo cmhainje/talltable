@@ -96,6 +96,20 @@ def status():
 # *** SQL ***
 
 
+prefetch_sem = asyncio.Semaphore(2)
+
+def warm(path):
+    with open(path, 'rb') as f:
+        while f.read(4*1024*1024):
+            pass
+
+async def prefetch_files(paths, max_workers=16):
+    async with prefetch_sem:
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            await asyncio.gather(*[loop.run_in_executor(ex, warm, p) for p in paths])
+
+
 def uses_pixels(sql):
     for table in parse_one(sql, read="duckdb").find_all(exp.Table):
         if table.name == "pixels":
@@ -203,8 +217,13 @@ def arrow_stream(
 
 
 @app.post("/sql")
-def sql(req: SQLRequest):
+async def sql(req: SQLRequest):
     con = get_con()
+
+    if req.partitions is not None:
+        paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
+        await prefetch_files(paths)
+
     return StreamingResponse(
         stream_with_timeout(
             arrow_stream(req.into_sql(), con),
@@ -248,8 +267,13 @@ def json_stream(
 
 
 @app.post("/sql.json")
-def sql_json(req: SQLRequest):
+async def sql_json(req: SQLRequest):
     con = get_con()
+
+    if req.partitions is not None:
+        paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
+        await prefetch_files(paths)
+
     return StreamingResponse(
         stream_with_timeout(
             json_stream(req.into_sql(), con),

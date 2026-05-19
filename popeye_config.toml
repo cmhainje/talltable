@@ -1,0 +1,4 @@
+[paths]
+data_dir    = "/mnt/sdceph/users/spherex/spherex_data_qr2"
+db_dir      = "/mnt/sdceph/users/spherex/talltable"
+scratch_dir = "/mnt/sdceph/users/chainje/spxdb-scratch"
