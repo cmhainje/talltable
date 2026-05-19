@@ -5,6 +5,7 @@ import json
 import os
 import pyarrow.ipc as ipc
 import struct
+import tempfile
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -281,6 +282,47 @@ async def sql_json(req: SQLRequest):
             on_timeout=con.interrupt,
         ),
         media_type="application/json",
+    )
+
+
+async def tmpfile_parquet_stream(sql: str, con: duckdb.DuckDBPyConnection):
+    loop = asyncio.get_event_loop()
+
+    # TemporaryDirectory() calls mkdtemp() internally, so tmpdir is unique per request.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out_path = os.path.join(tmpdir, "result.parquet")
+
+        write_future = loop.run_in_executor(
+            executor,
+            lambda: con.execute(f"COPY ({sql}) TO '{out_path}' (FORMAT PARQUET)"),
+        )
+        try:
+            await asyncio.wait_for(asyncio.shield(write_future), timeout=TIMEOUT_SEC)
+        except TimeoutError:
+            con.interrupt()
+            await write_future
+            raise HTTPException(status_code=504, detail="Query timed out")
+        except duckdb.Error as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            con.close()
+
+        with open(out_path, "rb") as f:
+            while chunk := f.read(256 * 1024):
+                yield chunk
+
+
+@app.post("/sql.tmpfile")
+async def sql_tmpfile(req: SQLRequest):
+    con = get_con()
+
+    if req.partitions is not None:
+        paths = [PIXEL_DB_PATH / f"part={p}/compacted.parquet" for p in req.partitions]
+        await prefetch_files(paths)
+
+    return StreamingResponse(
+        tmpfile_parquet_stream(req.into_sql(), con),
+        media_type="application/octet-stream",
     )
 
 

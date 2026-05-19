@@ -234,9 +234,7 @@ class PixelQuery:
         """Return the SQL query string."""
         if self._region is None:
             raise ValueError("Region must be specified before calling sql()")
-        waves_source = "read_parquet('/mnt/sdceph/users/spherex/talltable/waves.parquet')"
-        images_source = "read_parquet('/mnt/sdceph/users/spherex/talltable/image.parquet')"
-        return self._build_sql("pixels", waves_source, images_source)
+        return self._build_sql("pixels", "waves", "images")
 
     def _local_sql(self, parts: list[int]) -> str:
         paths = [f"'{PIXEL_DB_PATH / f'part={p}/compacted.parquet'}'" for p in parts]

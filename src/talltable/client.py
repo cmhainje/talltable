@@ -64,6 +64,14 @@ def fetch_arrow_to_parquet(url, payload, output):
             if writer:
                 writer.close()
 
+def fetch_parquet(url, payload, output):
+    with requests.post(url, json=payload, stream=True) as response:
+        response.raise_for_status()
+        with open(output, "wb") as f:
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                f.write(chunk)
+
+
 def sql_query(query: str, partitions: list[int], output_path: Path | None = None):
     if output_path is None:
         return fetch_arrow_stream(
@@ -82,5 +90,13 @@ def sql_query(query: str, partitions: list[int], output_path: Path | None = None
             },
             output_path
         )
+
+
+def sql_query_tmpfile(query: str, partitions: list[int], output_path: Path):
+    fetch_parquet(
+        f"{BASE_URL}/sql.tmpfile",
+        {"query": query, "partitions": partitions},
+        output_path,
+    )
 
 
