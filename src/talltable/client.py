@@ -64,14 +64,6 @@ def fetch_arrow_to_parquet(url, payload, output):
             if writer:
                 writer.close()
 
-def fetch_parquet(url, payload, output):
-    with requests.post(url, json=payload, stream=True) as response:
-        response.raise_for_status()
-        with open(output, "wb") as f:
-            for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
-                f.write(chunk)
-
-
 def sql_query(query: str, partitions: list[int], output_path: Path | None = None):
     if output_path is None:
         return fetch_arrow_stream(
@@ -91,32 +83,5 @@ def sql_query(query: str, partitions: list[int], output_path: Path | None = None
             output_path
         )
 
-
-def sql_query_ipc(query: str, partitions: list[int], output_path: Path | None = None):
-    payload = {"query": query, "partitions": partitions}
-    if output_path is None:
-        buf = io.BytesIO()
-        with requests.post(f"{BASE_URL}/sql.ipc", json=payload, stream=True) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):
-                buf.write(chunk)
-        buf.seek(0)
-        return ipc.open_stream(buf).read_all()
-    else:
-        fetch_parquet(f"{BASE_URL}/sql.ipc", payload, output_path)
-
-
-def sql_query_tmpfile(query: str, partitions: list[int], output_path: Path | None = None):
-    payload = {"query": query, "partitions": partitions}
-    if output_path is None:
-        buf = io.BytesIO()
-        with requests.post(f"{BASE_URL}/sql.tmpfile", json=payload, stream=True) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_content(chunk_size=4 * 1024 * 1024):
-                buf.write(chunk)
-        buf.seek(0)
-        return ipc.open_file(buf).read_all()
-    else:
-        fetch_parquet(f"{BASE_URL}/sql.tmpfile", payload, output_path)
 
 
