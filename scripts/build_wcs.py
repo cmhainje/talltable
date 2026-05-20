@@ -5,7 +5,7 @@ import sys
 
 from argparse import ArgumentParser
 from astropy.io import fits
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from os.path import basename
 from tqdm.auto import tqdm
 
@@ -40,8 +40,8 @@ def extract_WCS(todo_tuple):
             for key in keys:
                 data[key] = header[key]
             return data
-    except FileNotFoundError:
-        print(f"warning: {_path} not found")
+    except Exception as err:
+        print(f"warning: extraction failed for {_path}\n{err}")
         return None
 
 
@@ -105,8 +105,11 @@ if __name__ == '__main__':
     if args.num_workers == 1:
         new_data = list(map(extract_WCS, tqdm(todo)))
     else:
+        new_data = []
         with ProcessPoolExecutor(max_workers=args.num_workers) as ex:
-            new_data = list(ex.map(extract_WCS, tqdm(todo)))
+            futures = [ ex.submit(extract_WCS, item) for item in todo ]
+            for future in tqdm(as_completed(futures), total=len(futures)):
+                new_data.append(future.result())
 
     new_data = [ row for row in new_data if row is not None ]
 
