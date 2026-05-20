@@ -12,9 +12,8 @@ from tqdm.auto import tqdm
 from talltable.paths import DATA_DIR, IMAGE_DB_PATH, WCS_DB_PATH
 
 
-# make list of keys
+# WCS keys to extract
 keys = [
-    "imageid",
     "CRPIX1",
     "CRPIX2",
     "CRVAL1",
@@ -23,14 +22,15 @@ keys = [
     "PC1_2",
     "PC2_1",
     "PC2_2",
+] + [
+    f"{coeff}_{p}_{q}"
+    for coeff in ['A', 'B']
+    for p in range(4)
+    for q in range(4 - p)
 ]
-for coeff in ['A', 'B']:
-    for p in range(4):
-        for q in range(4 - p):
-            keys.append(f"{coeff}_{p}_{q}")
 
 
-def process(todo_tuple):
+def extract_WCS(todo_tuple):
     """extract WCS parameters from filepath"""
     imageid, filepath = todo_tuple
     try:
@@ -38,8 +38,6 @@ def process(todo_tuple):
             header = hdul["IMAGE"].header
             data = { "imageid": imageid }
             for key in keys:
-                if key == "imageid":
-                    continue
                 data[key] = header[key]
             return data
     except FileNotFoundError:
@@ -54,12 +52,17 @@ if __name__ == '__main__':
     ap.add_argument('--local', action='store_true')
     args = ap.parse_args()
 
+    print(
+        f"building WCS table using {args.num_workers} worker"
+        + ("s" if args.num_workers > 1 else "")
+        + (" (using local modifications)" if args.local else "")
+        )
 
-    # *** FIGURE OUT WHICH TO INGEST ***
+
+    # *** figure out what to ingest ***
 
     # collect all ingested files
     ingested = duckdb.sql(f"SELECT imageid, filepath FROM read_parquet('{IMAGE_DB_PATH}')").fetchall()
-    #      ^ list of (id, path) tuples
 
     # collect the known ids
     if WCS_DB_PATH.exists():
@@ -68,10 +71,11 @@ if __name__ == '__main__':
     else:
         known_ids = set()
 
-    # make a list of all the new imageids and filepaths to do
+    # make a list of *new* imageids and filepaths to do
     todo = []
 
     if args.local:
+        # narrow only to files which exist locally and move paths to DATA_DIR
         local_files = set(p.name for p in DATA_DIR.glob("*.fits"))
 
         for (_id, _path) in ingested:
@@ -92,22 +96,22 @@ if __name__ == '__main__':
         print("no work to do!")
         sys.exit(0)
 
-    print(f"{len(todo)} files identified")
+    print(f"{len(todo)} files identified to ingest WCS")
 
 
     # *** collect the WCS params of those new images ***
 
     # loop over the images
     if args.num_workers == 1:
-        new_data = list(map(process, tqdm(todo)))
+        new_data = list(map(extract_WCS, tqdm(todo)))
     else:
         with ProcessPoolExecutor(max_workers=args.num_workers) as ex:
-            new_data = list(ex.map(process, tqdm(todo)))
+            new_data = list(ex.map(extract_WCS, tqdm(todo)))
 
     new_data = [ row for row in new_data if row is not None ]
 
     # cast to PyArrow table with columns sorted alphabetically
-    new_table = pa.table({k: [row[k] for row in new_data] for k in sorted(keys)})
+    new_table = pa.table({k: [row[k] for row in new_data] for k in sorted(keys + ['imageid'])})
     del new_data
 
 
