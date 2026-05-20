@@ -114,10 +114,13 @@ if __name__ == '__main__':
     new_table = pa.table({k: [row[k] for row in new_data] for k in sorted(keys + ['imageid'])})
     del new_data
 
+    print("built pyarrow table")
+
 
     # *** write it out ***
 
     if WCS_DB_PATH.exists():
+        print("merging into existing file...")
         old_table = pq.ParquetFile(WCS_DB_PATH).read()
         table = pa.concat_tables(old_table, new_table)
         tmp_path = WCS_DB_PATH.with_suffix('.tmp')
@@ -131,6 +134,7 @@ if __name__ == '__main__':
         tmp_path.replace(WCS_DB_PATH)
 
     else:
+        print("writing new parquet file...")
         pq.write_table(
             new_table,
             WCS_DB_PATH,
@@ -138,5 +142,5 @@ if __name__ == '__main__':
             compression_level=3,
             use_dictionary=False,
         )
-
+    print("done!")
 
