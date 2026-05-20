@@ -2,11 +2,17 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from argparse import ArgumentParser
 from astropy.io import fits
 from os.path import basename
 from tqdm.auto import tqdm
 
 from talltable.paths import DATA_DIR, IMAGE_DB_PATH, WCS_DB_PATH
+
+
+ap = ArgumentParser()
+ap.add_argument('--local', action='store_true')
+args = ap.parse_args()
 
 
 # *** FIGURE OUT WHICH TO INGEST ***
@@ -22,15 +28,23 @@ if WCS_DB_PATH.exists():
 else:
     known_ids = set()
 
-# collect the known filepaths (remove this in prod)
-local_files = set(p.name for p in DATA_DIR.glob("*.fits"))
-
 # make a list of all the new imageids and filepaths to do
 todo = []
-for (_id, _path) in ingested:
-    _name = basename(_path)
-    if _id not in known_ids and _name in local_files:
-        todo.append((_id, DATA_DIR / _name))
+
+if args.local:
+    local_files = set(p.name for p in DATA_DIR.glob("*.fits"))
+
+    for (_id, _path) in ingested:
+        _name = basename(_path)
+        if _id not in known_ids and _name in local_files:
+            todo.append((_id, DATA_DIR / _name))
+
+    del local_files
+
+else:
+    for (_id, _path) in ingested:
+        if _id not in known_ids:
+            todo.append((_id, _path))
 
 del ingested, known_ids
 
