@@ -6,9 +6,10 @@ import pyarrow as pa
 
 from pathlib import Path
 
-from talltable.constants import HP_HIGH_LEVEL, PART_MAX_LEVEL, SERVICE_URL
+from talltable.constants import HP_HIGH_LEVEL, SERVICE_URL
 from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix
 from talltable.paths import PART_DB_PATH, PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
+from talltable.query import choose_filter_level, indices_to_hphigh_ranges
 
 
 _KNOWN_SOURCE_BIT = 1 << 21  # bit 21: pixel is near a known source
@@ -17,47 +18,18 @@ _MAX_FILTER_RANGES = 500
 _FILTER_TARGET_PIXELS = 1000
 
 
-def _choose_filter_level(region) -> int:
-    """Choose HEALPix level L so the region spans ~_FILTER_TARGET_PIXELS pixels."""
+
+def _region_area_deg2(region) -> float | None:
+    """Return region area in deg², or None for ipix regions."""
     kind = region[0]
     if kind == "disc":
         _, ra, dec, radius_deg = region
-        area = np.pi * np.radians(radius_deg) ** 2
+        return np.pi * radius_deg ** 2
     elif kind == "rect":
         _, ra, dec, width_deg, height_deg = region
-        area = np.radians(width_deg) * np.radians(height_deg)
-    else:
-        return HP_HIGH_LEVEL
-    # N_pix ≈ 3 * area_rad² * 4^L  →  4^L = TARGET*π / (3*area)
-    nside_sq = _FILTER_TARGET_PIXELS * np.pi / (3.0 * area)
-    L = round(np.log2(nside_sq) / 2)
-    return max(PART_MAX_LEVEL, min(HP_HIGH_LEVEL, L))
+        return width_deg * height_deg
+    return None
 
-
-def _indices_to_hphigh_ranges(ipix_L: np.ndarray, shift: int) -> list[tuple[int, int]]:
-    """Convert sorted level-L pixel indices to merged hphigh (lo, hi) inclusive ranges."""
-    ipix_L = np.sort(np.unique(ipix_L)).astype(np.int64)
-    if len(ipix_L) == 0:
-        return []
-    los = ipix_L << shift
-    his = ((ipix_L + 1) << shift) - 1
-    ranges: list[tuple[int, int]] = []
-    cur_lo, cur_hi = int(los[0]), int(his[0])
-    for lo, hi in zip(los[1:], his[1:]):
-        lo, hi = int(lo), int(hi)
-        if lo <= cur_hi + 1:
-            cur_hi = max(cur_hi, hi)
-        else:
-            ranges.append((cur_lo, cur_hi))
-            cur_lo, cur_hi = lo, hi
-    ranges.append((cur_lo, cur_hi))
-    return ranges
-
-
-def _ipix_hphigh_ranges(indices, level: int) -> list[tuple[int, int]]:
-    """Convert user-supplied HEALPix indices at the given level to hphigh ranges."""
-    shift = 2 * (HP_HIGH_LEVEL - level)
-    return _indices_to_hphigh_ranges(np.asarray(indices, dtype=np.int64), shift)
 
 
 def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
@@ -74,9 +46,9 @@ def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
     region is large enough that partition selection is already a sufficient
     approximation and adding a filter would generate unwieldy SQL.
     """
-    level = _choose_filter_level(region)
+    area = _region_area_deg2(region)
+    level = choose_filter_level(area) if area is not None else HP_HIGH_LEVEL
     nside = 2 ** level
-    shift = 2 * (HP_HIGH_LEVEL - level)
 
     kind = region[0]
     if kind == "disc":
@@ -94,7 +66,7 @@ def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
         )
         ipix_L = hp.query_polygon(nside, corners, nest=True, inclusive=True)
 
-    ranges = _indices_to_hphigh_ranges(ipix_L, shift)
+    ranges = indices_to_hphigh_ranges(ipix_L, level)
     return ranges if len(ranges) <= _MAX_FILTER_RANGES else None
 
 
@@ -296,7 +268,7 @@ class PixelQuery:
         kind = self._region[0]
         if kind == "ipix":
             _, indices, level = self._region
-            ranges = _ipix_hphigh_ranges(indices, level)
+            ranges = indices_to_hphigh_ranges(indices, level)
             comment = f"-- ipix, level {level}"
             clauses = [f"(p.hphigh BETWEEN {lo} AND {hi})" for lo, hi in ranges]
             body = clauses[0] if len(clauses) == 1 else "(\n    " + "\n    OR ".join(clauses) + "\n  )"
@@ -304,7 +276,7 @@ class PixelQuery:
         elif kind in ("disc", "rect"):
             ranges = _disc_rect_hphigh_ranges(self._region)
             if ranges:
-                filter_level = _choose_filter_level(self._region)
+                filter_level = choose_filter_level(_region_area_deg2(self._region))
                 if kind == "disc":
                     _, ra, dec, radius = self._region
                     comment = f"-- disc(ra={ra}, dec={dec}, radius={radius}°), level-{filter_level} hphigh ranges"
