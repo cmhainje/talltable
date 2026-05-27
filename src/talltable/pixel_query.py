@@ -114,12 +114,12 @@ class PixelQuery:
 
     def disc(self, ra: float, dec: float, radius: float) -> PixelQuery:
         """Circular region on sky. ra/dec in degrees, radius in arcmin."""
-        self._region = ("disc", ra, dec, radius * 60.0)
+        self._region = ("disc", ra, dec, radius / 60.0)
         return self
 
     def rect(self, ra: float, dec: float, width: float, height: float) -> PixelQuery:
         """Rectangular region on sky. ra/dec is center, width/height in arcmin."""
-        self._region = ("rect", ra, dec, width * 60.0, height * 60.0)
+        self._region = ("rect", ra, dec, width / 60.0, height / 60.0)
         return self
 
     def ipix(self, indices: list[int], level: int) -> PixelQuery:

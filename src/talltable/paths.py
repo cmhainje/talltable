@@ -13,6 +13,7 @@ PIXEL_DB_PATH   = DB_DIR / "pixels"
 IMAGE_DB_PATH   = DB_DIR / "image.parquet"
 WAVES_DB_PATH   = DB_DIR / "waves.parquet"
 EPHEM_DB_PATH   = DB_DIR / "ephem.parquet"
+WCS_DB_PATH     = DB_DIR / "wcs.parquet"
 IMAGE_PARTS_DIR = DB_DIR / "image_parts"
 PART_DB_PATH    = DB_DIR / "parts.txt"
 
