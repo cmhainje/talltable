@@ -13,7 +13,7 @@ from talltable.partition import (
     find_partitions_rect,
     find_partitions_ipix,
 )
-from talltable.paths import PART_DB_PATH, IMAGE_DB_PATH, WAVES_DB_PATH, DB_DIR
+from talltable.paths import PART_DB_PATH, IMAGE_DB_PATH, WAVES_DB_PATH, WCS_DB_PATH, DB_DIR
 
 
 CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
@@ -181,7 +181,8 @@ if __name__ == "__main__":
     download_file("parts.txt",     PART_DB_PATH,  headers)
     download_file("image.parquet", IMAGE_DB_PATH, headers)
     download_file("waves.parquet", WAVES_DB_PATH, headers)
-    print("downloaded partition, image, and wavelength tables")
+    download_file("wcs.parquet",   WCS_DB_PATH, headers)
+    print("downloaded partition, image, wavelength, wcs tables")
 
     # look up which partitions to copy and copy them
     partitions = args.find_partitions(args)
