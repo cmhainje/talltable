@@ -1,7 +1,7 @@
 import os
 import numpy as np
 
-SERVICE_URL = os.environ.get("TALLTABLE_URL", "http://your-actual-host:8000")
+SERVICE_URL = os.environ.get("TALLTABLE_URL", "https://talltable.flatironinstitute.org")
 
 PART_MIN_LEVEL = 6
 PART_MAX_LEVEL = 10
