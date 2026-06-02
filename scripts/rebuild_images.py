@@ -5,7 +5,9 @@ from astropy.io import fits
 from glob import glob
 from tqdm import tqdm
 
-from talltable.paths import DATA_DIR, IMAGE_DB_PATH
+from talltable.paths import IMAGE_DB_PATH, require_env
+
+DATA_DIR = require_env("TALLTABLE_DATA_DIR")
 
 data = {
     "imageid": [],

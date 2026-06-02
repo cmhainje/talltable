@@ -20,9 +20,28 @@ from os.path import basename
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from talltable.batch import BatchWriter, read_image
-from talltable.query import get_image_filepaths
-from talltable.paths import DATA_DIR, PIXEL_DB_PATH, IMAGE_PARTS_DIR, SCRATCH_DIR
+from pathlib import Path
+from talltable.paths import (
+    IMAGE_DB_PATH,
+    PIXEL_DB_PATH,
+    IMAGE_PARTS_DIR,
+    SCRATCH_DIR,
+    require_env,
+)
+from talltable_pipeline.batch import BatchWriter, read_image
+
+DATA_DIR = require_env("TALLTABLE_DATA_DIR")
+
+
+def get_image_filepaths() -> list[str]:
+    import duckdb
+
+    if IMAGE_DB_PATH.exists():
+        query = duckdb.sql(f"SELECT filepath FROM read_parquet('{IMAGE_DB_PATH}')")
+        output = query.fetchnumpy()["filepath"]
+        return [str(x) for x in output]
+    else:
+        return []
 
 
 task_id = int(os.environ.get("SLURM_PROCID", 0))

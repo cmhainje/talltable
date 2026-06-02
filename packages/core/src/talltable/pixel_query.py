@@ -8,7 +8,6 @@ from pathlib import Path
 
 from talltable.constants import HP_HIGH_LEVEL, SERVICE_URL
 from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix
-from talltable.paths import PART_DB_PATH, PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
 from talltable.query import choose_filter_level, indices_to_hphigh_ranges
 
 
@@ -72,6 +71,16 @@ def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
 
 class PixelQuery:
     def __init__(self, web: bool = False, base_url: str = SERVICE_URL):
+        if not web:
+            try:
+                from talltable import paths as _
+            except RuntimeError:
+                raise RuntimeError(
+                    "PixelQuery() requires local database configuration (TALLTABLE_DB_DIR). "
+                    "See example.env or https://connorhainje.com/talltable for setup instructions.\n\n"
+                    "Note: if you want to query the web service instead, use PixelQuery(web=True). "
+                    "No local setup needed."
+                ) from None
         self._web = web
         self._base_url = base_url.rstrip("/")
         self._region = None
@@ -164,6 +173,7 @@ class PixelQuery:
             return self._local_partitions()
 
     def _local_partitions(self) -> list[int]:
+        from talltable.paths import PART_DB_PATH
         with open(PART_DB_PATH) as f:
             all_parts = set(int(line.strip()) for line in f)
         kind = self._region[0]
@@ -215,6 +225,7 @@ class PixelQuery:
         return self._build_sql("pixels", "waves", "images")
 
     def _local_sql(self, parts: list[int]) -> str:
+        from talltable.paths import PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
         paths = [f"'{PIXEL_DB_PATH / f'part={p}/compacted.parquet'}'" for p in parts]
         if len(paths) == 1:
             pixel_source = f"read_parquet({paths[0]})"

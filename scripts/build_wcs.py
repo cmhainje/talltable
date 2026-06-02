@@ -9,7 +9,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from os.path import basename
 from tqdm.auto import tqdm
 
-from talltable.paths import DATA_DIR, IMAGE_DB_PATH, WCS_DB_PATH
+from talltable.paths import IMAGE_DB_PATH, WCS_DB_PATH, require_env
+
+DATA_DIR = require_env("TALLTABLE_DATA_DIR")
 
 
 # WCS keys to extract
