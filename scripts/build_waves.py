@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from talltable.constants import ALL_ROW, ALL_COL
 from talltable.paths import DB_DIR, WAVES_DB_PATH, require_env
-from talltable.util import byteswap
+from talltable_pipeline.util import byteswap
 from talltable.waveid import rowcoldet_to_waveid
 
 DATA_DIR = require_env("TALLTABLE_DATA_DIR")

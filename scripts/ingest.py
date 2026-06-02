@@ -20,7 +20,6 @@ from os.path import basename
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from pathlib import Path
 from talltable.paths import (
     IMAGE_DB_PATH,
     PIXEL_DB_PATH,

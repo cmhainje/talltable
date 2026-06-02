@@ -1,6 +1,5 @@
 import healpy as hp
 import logging
-import os
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -13,8 +12,9 @@ from pathlib import Path
 from talltable.constants import ALL_ROW, ALL_COL, HP_HIGH_LEVEL, PART_MAX_LEVEL, PART_MIN_LEVEL
 from talltable.paths import IMAGE_PARTS_DIR, image_part_path, PART_DB_PATH, SCRATCH_DIR, require_env
 from talltable.waveid import rowcoldet_to_waveid
-from talltable.util import defer_interrupt, now_simpleformat, byteswap
 from talltable.partition import level_index_to_part
+
+from .util import defer_interrupt, now_simpleformat, byteswap
 
 DATA_DIR = require_env("TALLTABLE_DATA_DIR")
 
