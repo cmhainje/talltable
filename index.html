@@ -22,20 +22,22 @@ documentation</h1>
 <nav id="TOC" role="doc-toc">
 <ul>
 <li><a href="#authors" id="toc-authors">Authors</a></li>
-<li><a href="#getting-started" id="toc-getting-started">Getting
-                                        started</a>
+<li><a href="#quick-start" id="toc-quick-start">Quick
+                                        start</a>
 <ul>
-<li><a href="#tldr" id="toc-tldr">TL;DR</a></li>
-<li><a href="#installation" id="toc-installation">Installation</a></li>
-<li><a href="#configuration" id="toc-configuration">Configuration</a></li>
+<li><a href="#using-the-web-service" id="toc-using-the-web-service">Using
+                                        the web service</a></li>
+<li><a href="#local-queries" id="toc-local-queries">Local
+                                        queries</a></li>
 </ul></li>
 <li><a href="#access" id="toc-access">Access</a>
 <ul>
-<li><a href="#popeye-cluster" id="toc-popeye-cluster">Popeye
-                                        cluster</a></li>
-<li><a href="#globus" id="toc-globus">Globus</a></li>
 <li><a href="#web-service" id="toc-web-service">Web
                                         service</a></li>
+<li><a href="#downloading-chunks-for-local-use" id="toc-downloading-chunks-for-local-use">Downloading
+                                        chunks for local use</a></li>
+<li><a href="#popeye-cluster" id="toc-popeye-cluster">Popeye
+                                        cluster</a></li>
 </ul></li>
 <li><a href="#schema" id="toc-schema">Schema</a>
 <ul>
@@ -54,7 +56,7 @@ documentation</h1>
                                         the database yourself</a></li>
 </ul>
 </nav>
-<details open="True"><summary><h1 id="authors">Authors</h1></summary><p>This database and associated package are authored
+<details open="True"><summary><h1 id="authors">Authors</h1></summary><p>This database and associated package(s) are authored
                 by</p><ul>
 <li><strong>Connor Hainje</strong>, NYU</li>
 <li><strong>David W Hogg</strong>, NYU+</li>
@@ -63,36 +65,61 @@ documentation</h1>
 
 
 
-<details open="True"><summary><h1 id="getting-started">Getting started</h1></summary><details open="True"><summary><h2 id="tldr">TL;DR</h2></summary><pre><code># install
-git clone https://github.com/cmhainje/talltable.git
-cd talltable
-uv sync
+<details open="True"><summary><h1 id="quick-start">Quick start</h1></summary><p>There are three main ways to interact with the
+                talltable.</p><ol type="1">
+<li>Querying the database via the web service.</li>
+<li>Querying the database locally. This requires either
+                access to the Flatiron Institute cluster where the full
+                database lives, or for you to download the chunks of the
+                database that you need.</li>
+<li>Building the database from the SPHEREx spectral
+                image files yourself.</li>
+</ol><p>If you want to do option 3, read <a href="/#building-the-database-yourself">Building the
+                database yourself</a>.</p><p>Otherwise, start by installing the core talltable
+                package:</p><pre><code>uv add 'talltable @ git+https://github.com/cmhainje/talltable.git#subdirectory=packages/core'</code></pre><p>or, if you use pip:</p><pre><code>pip install 'talltable @ git+https://github.com/cmhainje/talltable.git#subdirectory=packages/core'</code></pre><p>This package provides a client for the web service as
+                well as a number of utilities that are helpful for
+                building queries.</p><details open="True"><summary><h2 id="using-the-web-service">Using the web
+                service</h2></summary><p>Out of the box, you should be able to use the
+                <code>PixelQuery</code> class to build and execute
+                simple queries.</p><div class="sourceCode" id="cb3"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb3-1"><a aria-hidden="true" href="#cb3-1" tabindex="-1"></a><span class="im">from</span> talltable <span class="im">import</span> PixelQuery</span>
+<span id="cb3-2"><a aria-hidden="true" href="#cb3-2" tabindex="-1"></a></span>
+<span id="cb3-3"><a aria-hidden="true" href="#cb3-3" tabindex="-1"></a>table <span class="op">=</span> (</span>
+<span id="cb3-4"><a aria-hidden="true" href="#cb3-4" tabindex="-1"></a>    PixelQuery(web<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb3-5"><a aria-hidden="true" href="#cb3-5" tabindex="-1"></a>    .disc(</span>
+<span id="cb3-6"><a aria-hidden="true" href="#cb3-6" tabindex="-1"></a>        <span class="fl">98.4</span>,  <span class="co"># ra [deg]</span></span>
+<span id="cb3-7"><a aria-hidden="true" href="#cb3-7" tabindex="-1"></a>        <span class="fl">5.0</span>,   <span class="co"># dec [deg]</span></span>
+<span id="cb3-8"><a aria-hidden="true" href="#cb3-8" tabindex="-1"></a>        <span class="fl">30.0</span>   <span class="co"># radius [arcmin]</span></span>
+<span id="cb3-9"><a aria-hidden="true" href="#cb3-9" tabindex="-1"></a>    )  </span>
+<span id="cb3-10"><a aria-hidden="true" href="#cb3-10" tabindex="-1"></a>    .with_wavelengths()</span>
+<span id="cb3-11"><a aria-hidden="true" href="#cb3-11" tabindex="-1"></a>    .execute()</span>
+<span id="cb3-12"><a aria-hidden="true" href="#cb3-12" tabindex="-1"></a>)</span></code></pre></div><p>More details on the <code>PixelQuery</code> class <a href="/#query-builder">below</a>.</p></details><details open="True"><summary><h2 id="local-queries">Local queries</h2></summary><p>In order to query <em>local</em> database files, you
+                need to configure talltable so that it knows where the
+                database lives. This is done with the environment
+                variable <code>TALLTABLE_DB_DIR</code>. Set this however
+                you like:</p><ul>
+<li>Make a <code>.env</code> file and pass it to uv
+                whenever you run commands
+                (<code>uv run --env-file .env ...</code>)</li>
+<li>Set <code>export TALLTABLE_DB_DIR=/path/to/db</code>
+                in your <code>.bashrc</code> or <code>.zshrc</code> (or
+                whatever shell you used)</li>
+<li>Or however else you want to manage env vars for your
+                project.</li>
+</ul><p><strong>For Flatiron users:</strong> use
+                <code>TALLTABLE_DB_DIR=/mnt/sdceph/users/spherex/talltable</code>.</p><p>Then, you can use the <code>PixelQuery</code> class
+                to build and execute simple queries.</p><div class="sourceCode" id="cb4"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb4-1"><a aria-hidden="true" href="#cb4-1" tabindex="-1"></a><span class="im">from</span> talltable <span class="im">import</span> PixelQuery</span>
+<span id="cb4-2"><a aria-hidden="true" href="#cb4-2" tabindex="-1"></a></span>
+<span id="cb4-3"><a aria-hidden="true" href="#cb4-3" tabindex="-1"></a>table <span class="op">=</span> (</span>
+<span id="cb4-4"><a aria-hidden="true" href="#cb4-4" tabindex="-1"></a>    PixelQuery(web<span class="op">=</span><span class="va">False</span>)</span>
+<span id="cb4-5"><a aria-hidden="true" href="#cb4-5" tabindex="-1"></a>    .disc(</span>
+<span id="cb4-6"><a aria-hidden="true" href="#cb4-6" tabindex="-1"></a>        <span class="fl">98.4</span>,  <span class="co"># ra [deg]</span></span>
+<span id="cb4-7"><a aria-hidden="true" href="#cb4-7" tabindex="-1"></a>        <span class="fl">5.0</span>,   <span class="co"># dec [deg]</span></span>
+<span id="cb4-8"><a aria-hidden="true" href="#cb4-8" tabindex="-1"></a>        <span class="fl">30.0</span>   <span class="co"># radius [arcmin]</span></span>
+<span id="cb4-9"><a aria-hidden="true" href="#cb4-9" tabindex="-1"></a>    )  </span>
+<span id="cb4-10"><a aria-hidden="true" href="#cb4-10" tabindex="-1"></a>    .with_wavelengths()</span>
+<span id="cb4-11"><a aria-hidden="true" href="#cb4-11" tabindex="-1"></a>    .execute()</span>
+<span id="cb4-12"><a aria-hidden="true" href="#cb4-12" tabindex="-1"></a>)</span></code></pre></div></details></details>
 
-# configure
-cp example_config.toml config.toml
-# &lt;EDIT CONFIG&gt;
-
-# pull down (part of) the database using globus
-uv run python scripts/globus.py disc "06h33m45s" "04d59m54s" 3.0
-# &lt;REQUIRES A GLOBUS ACCOUNT &amp; PERMISSION, EMAIL ME&gt;</code></pre></details><details open="True"><summary><h2 id="installation">Installation</h2></summary><p>The project can be installed by</p><pre><code>git clone https://github.com/cmhainje/talltable.git
-cd talltable</code></pre><p>Inside, there is a Python package,
-                <code>talltable</code>, which handles building and
-                interfacing with the database. Install the package and
-                all dependencies from inside the project with</p><pre><code>uv sync</code></pre><p>To test that it installed correctly,</p><pre><code>uv run python -c "import talltable; print('ok!')"
-ok!</code></pre></details><details open="True"><summary><h2 id="configuration">Configuration</h2></summary><p>Next, you need to make a <code>config.toml</code>
-                directory in the project root. There’s an example; copy
-                it:</p><pre><code>cp example_config.toml config.toml</code></pre><p>and then replace the paths with your own.</p><ul>
-<li><code>data_dir</code> is only needed if you’re going
-                to download raw SPHEREx FITS files and use it to build
-                the database yourself. (Set to a dummy path if you don’t
-                need it.)</li>
-<li><code>db_dir</code> is where the database files
-                live.</li>
-<li><code>scratch_dir</code> is where transient files
-                produced during ingestion live. (Unless you have reason
-                to do something else, make this a dummy path or set it
-                to the same path as <code>db_dir</code>.)</li>
-</ul></details></details>
 
 
 
@@ -107,37 +134,51 @@ ok!</code></pre></details><details open="True"><summary><h2 id="configuration">C
 
 
 
-<details open="True"><summary><h1 id="access">Access</h1></summary><p>If you only want to <em>use</em> the database (and
-                not build it yourself), there are several ways to do
-                so.</p><details open="True"><summary><h2 id="popeye-cluster">Popeye cluster</h2></summary><p>If you are a researcher at the Flatiron Institute
+
+
+
+<details open="True"><summary><h1 id="access">Access</h1></summary><p>There are several ways to access the database, as
+                hinted at above.</p><details open="True"><summary><h2 id="web-service">Web service</h2></summary><p>There is a web service at
+                <code>https://talltable.flatironinstitute.org</code>. It
+                has only a handful of endpoints, and requires use via
+                the client provided in the <code>talltable</code>
+                package. The web service has fairly strict compute,
+                memory, and time limits on queries. If you want to run
+                large queries, you may be better serviced by downloading
+                parts of the pre-built database yourself!</p></details><details open="True"><summary><h2 id="downloading-chunks-for-local-use">Downloading
+                chunks for local use</h2></summary><p>The database is split into chunks based called
+                ‘partitions’, which individually are Parquet files. The
+                scheme for deciding on these partitions is described <a href="/#partitions">below</a>; briefly, the sky is
+                partitioned by adaptively-refined HEALPix indices. We
+                provide a few methods to download partitions in their
+                entirety.</p><ol type="1">
+<li>Download the files from <a href="https://sdsc-users.flatironinstitute.org/~chainje/talltable/">https://sdsc-users.flatironinstitute.org/~chainje/talltable/</a>.
+                These can be downloaded with curl or wget or whatever
+                you like.</li>
+<li>We are set up on Globus! This requires permissions,
+                email me for access.</li>
+</ol><p><strong>Important:</strong> if you are downloading a
+                part of the database for local use, you need to</p><ul>
+<li>Also download the files <code>parts.txt</code>,
+                <code>image.parquet</code>, and
+                <code>waves.parquet</code></li>
+<li>Replicate the directory structure within the
+                database directory exactly</li>
+<li>Specify via environment variable
+                (<code>TALLTABLE_DB_DIR</code>) the path to your local
+                database files</li>
+</ul><p>There is a script, <code>scripts/globus.py</code>,
+                which handles everything for you. You just need to
+                specify the database directory environment variable and
+                provide a region on sky; the script computes which
+                partitions to pull down and makes sure everything is in
+                the right place.</p></details><details open="True"><summary><h2 id="popeye-cluster">Popeye cluster</h2></summary><p>If you are a researcher at the Flatiron Institute
                 with access to the Popeye cluster, the files are all
-                available locally! Set the following in your
-                <code>config.toml</code>:</p><div class="sourceCode" id="cb6"><pre class="sourceCode toml"><code class="sourceCode toml"><span id="cb6-1"><a aria-hidden="true" href="#cb6-1" tabindex="-1"></a><span class="kw">[paths]</span></span>
-<span id="cb6-2"><a aria-hidden="true" href="#cb6-2" tabindex="-1"></a><span class="dt">data_dir</span>    <span class="op">=</span> <span class="st">"/mnt/sdceph/users/spherex/spherex_data_qr2"</span></span>
-<span id="cb6-3"><a aria-hidden="true" href="#cb6-3" tabindex="-1"></a><span class="dt">db_dir</span>      <span class="op">=</span> <span class="st">"/mnt/sdceph/users/spherex/talltable"</span></span>
-<span id="cb6-4"><a aria-hidden="true" href="#cb6-4" tabindex="-1"></a><span class="dt">scratch_dir</span> <span class="op">=</span> <span class="st">"/mnt/sdceph/users/spherex/talltable"</span></span></code></pre></div></details><details open="True"><summary><h2 id="globus">Globus</h2></summary><p>Our pre-built version of the database is also
-                available on Globus. You will need permissions in
-                Globus: email me for access.</p><p>You don’t need to download all of the database; to
-                execute queries, you only need <code>parts.txt</code>,
-                <code>image.parquet</code>, <code>waves.parquet</code>,
-                and whichever partitions in <code>pixels</code> are
-                relevant to your region on sky.</p><p>The script <code>scripts/globus.py</code> automates
-                this download. You define a sky region as a disc or
-                rectangle (centered at some RA/Dec with some radius or
-                width/height), or give a list of HEALPix indices. The
-                script then downloads only the necessary partitions,
-                putting them into the <code>db_dir</code> specified in
-                your config. This script is good for relatively small
-                downloads; let me know if you’re trying to pull down a
-                large fraction of the data, and we can find a better
-                solution.</p></details><details open="True"><summary><h2 id="web-service">Web service</h2></summary><p>We will (soon) release a public web service with an
-                endpoint to execute SQL queries against the database.
-                Note that this <em>will</em> be limited with relatively
-                stringent timeouts. If you are doing heavy analysis in
-                your queries, or if you are making a large number of
-                queries on one region, you will be better served by
-                pulling down the chunks of the database you need from
-                Globus.</p></details></details>
+                available locally! Set the following environment
+                variable:</p><pre><code>TALLTABLE_DB_DIR=/mnt/sdceph/users/spherex/talltable</code></pre><p>You should be good to go.</p></details></details>
+
+
+
 
 
 
@@ -161,16 +202,18 @@ ok!</code></pre></details><details open="True"><summary><h2 id="configuration">C
                 (from 0 to 2039) of a pixel in its source image. We
                 provide utilities in the <code>talltable</code> package
                 for translating between <code>waveid</code> and
-                detector, row, column.</p><div class="sourceCode" id="cb8"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb8-1"><a aria-hidden="true" href="#cb8-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.waveid <span class="im">import</span> rowcoldet_to_waveid, waveid_to_rowcoldet</span>
-<span id="cb8-2"><a aria-hidden="true" href="#cb8-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> rowcoldet_to_waveid(<span class="dv">479</span>, <span class="dv">1831</span>, <span class="dv">3</span>)</span>
-<span id="cb8-3"><a aria-hidden="true" href="#cb8-3" tabindex="-1"></a><span class="dv">52295463</span></span>
-<span id="cb8-4"><a aria-hidden="true" href="#cb8-4" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> waveid_to_rowcoldet(<span class="dv">52295463</span>)</span>
-<span id="cb8-5"><a aria-hidden="true" href="#cb8-5" tabindex="-1"></a>(<span class="dv">479</span>, <span class="dv">1831</span>, <span class="dv">3</span>)</span></code></pre></div></details><details open="True"><summary><h2 id="images">Images</h2></summary><p>The <strong>images</strong> table stores image
-                metadata. Its filename is <code>images.parquet</code>.
+                detector, row, column.</p><div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a aria-hidden="true" href="#cb7-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable <span class="im">import</span> rowcoldet_to_waveid, waveid_to_rowcoldet</span>
+<span id="cb7-2"><a aria-hidden="true" href="#cb7-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> rowcoldet_to_waveid(<span class="dv">479</span>, <span class="dv">1831</span>, <span class="dv">3</span>)</span>
+<span id="cb7-3"><a aria-hidden="true" href="#cb7-3" tabindex="-1"></a><span class="dv">52295463</span></span>
+<span id="cb7-4"><a aria-hidden="true" href="#cb7-4" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> waveid_to_rowcoldet(<span class="dv">52295463</span>)</span>
+<span id="cb7-5"><a aria-hidden="true" href="#cb7-5" tabindex="-1"></a>(<span class="dv">479</span>, <span class="dv">1831</span>, <span class="dv">3</span>)</span></code></pre></div></details><details open="True"><summary><h2 id="images">Images</h2></summary><p>The <strong>images</strong> table stores image
+                metadata. Its filename is <code>image.parquet</code>.
                 The table schema is</p><pre><code>images: {
-    imageid:  int
+    imageid:  int64
     filepath: str
-    @TODO
+    obsid:    str
+    t_beg:    float64
+    t_end:    float64
 }</code></pre></details><details open="True"><summary><h2 id="pixels">Pixels</h2></summary><p>The meat of the database — the namesake “tall table”
                 — is the <strong>pixels</strong> table. This database is
                 split over many files with filepaths like
@@ -185,7 +228,7 @@ ok!</code></pre></details><details open="True"><summary><h2 id="configuration">C
     imageid:  int64
     part:     int32
 }</code></pre><p>Details about each column are as follows:</p><ul>
-<li><code>hphigh</code> : a very level 22 HEALPix index
+<li><code>hphigh</code> : a level 22 HEALPix index
                 giving the position on sky of the pixel.</li>
 <li><code>flux</code>: the value of this pixel in the
                 <code>"IMAGE"</code> layer of the spectral image file.
@@ -233,15 +276,11 @@ level 8:  0b 0000 0001 0000 xxxx xxxx xxxx xxxx xxxx
 level 7:  0b 0000 0000 0100 00xx xxxx xxxx xxxx xxxx
 level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code>talltable</code> package, we provide
                 simple utitlity functions for translating between
-                <code>part</code> and <code>(level, index)</code>.</p><div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a aria-hidden="true" href="#cb12-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.partition <span class="im">import</span> level_index_to_part, part_to_level_index</span>
-<span id="cb12-2"><a aria-hidden="true" href="#cb12-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> level_index_to_part(<span class="dv">6</span>, <span class="dv">12345</span>)</span>
-<span id="cb12-3"><a aria-hidden="true" href="#cb12-3" tabindex="-1"></a><span class="dv">1060921</span></span>
-<span id="cb12-4"><a aria-hidden="true" href="#cb12-4" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> part_to_level_index(<span class="dv">1060921</span>)</span>
-<span id="cb12-5"><a aria-hidden="true" href="#cb12-5" tabindex="-1"></a>(<span class="dv">6</span>, <span class="dv">12345</span>)</span></code></pre></div><p>We also provide a utility for finding the partition
-                in the database which contains a point on sky (expects
-                RA/Dec in degrees).</p><div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a aria-hidden="true" href="#cb13-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.partition <span class="im">import</span> find_partition</span>
-<span id="cb13-2"><a aria-hidden="true" href="#cb13-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> find_partition(<span class="dv">350</span>, <span class="dv">5</span>)</span>
-<span id="cb13-3"><a aria-hidden="true" href="#cb13-3" tabindex="-1"></a><span class="at">@TODO</span>: output</span></code></pre></div><p>For larger queries, sometimes it can be useful to
+                <code>part</code> and <code>(level, index)</code>.</p><div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a aria-hidden="true" href="#cb11-1" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> <span class="im">from</span> talltable.partition <span class="im">import</span> level_index_to_part, part_to_level_index</span>
+<span id="cb11-2"><a aria-hidden="true" href="#cb11-2" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> level_index_to_part(<span class="dv">6</span>, <span class="dv">12345</span>)</span>
+<span id="cb11-3"><a aria-hidden="true" href="#cb11-3" tabindex="-1"></a><span class="dv">1060921</span></span>
+<span id="cb11-4"><a aria-hidden="true" href="#cb11-4" tabindex="-1"></a><span class="op">&gt;&gt;&gt;</span> part_to_level_index(<span class="dv">1060921</span>)</span>
+<span id="cb11-5"><a aria-hidden="true" href="#cb11-5" tabindex="-1"></a>(<span class="dv">6</span>, <span class="dv">12345</span>)</span></code></pre></div><p>For larger queries, sometimes it can be useful to
                 know all the partitions that have been created and at
                 what levels. We store this information in
                 <code>parts.txt</code>, which contains all the partition
@@ -267,11 +306,28 @@ level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code
 
 
 
-
-
-<details open="True"><summary><h1 id="queries">Queries</h1></summary><details open="True"><summary><h2 id="query-builder">Query builder</h2></summary><p>We will (soon) release a query builder which
-                constructs common kinds of queries with the fastest
-                structure that we know of.</p><p><span class="citation" data-cites="TODO">@TODO</span>: add documentation</p></details><details open="True"><summary><h2 id="cookbook">Cookbook</h2></summary><p>The general approach to building a fast query is the
+<details open="True"><summary><h1 id="queries">Queries</h1></summary><details open="True"><summary><h2 id="query-builder">Query builder</h2></summary><p>In the core <code>talltable</code> package, we
+                provide a query builder called <code>PixelQuery</code>.
+                It can be used to query the web service or local files.
+                Here are all the features it supports:</p><div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a aria-hidden="true" href="#cb12-1" tabindex="-1"></a>query <span class="op">=</span> (</span>
+<span id="cb12-2"><a aria-hidden="true" href="#cb12-2" tabindex="-1"></a>    PixelQuery(web<span class="op">=</span><span class="va">True</span>)  <span class="co"># or web=False if using local data</span></span>
+<span id="cb12-3"><a aria-hidden="true" href="#cb12-3" tabindex="-1"></a></span>
+<span id="cb12-4"><a aria-hidden="true" href="#cb12-4" tabindex="-1"></a>    <span class="co"># set a region using one of these three (required)</span></span>
+<span id="cb12-5"><a aria-hidden="true" href="#cb12-5" tabindex="-1"></a>    .disc(ra, dec, radius)         <span class="co"># cone search</span></span>
+<span id="cb12-6"><a aria-hidden="true" href="#cb12-6" tabindex="-1"></a>    .rect(ra, dec, width, height)  <span class="co"># rect search</span></span>
+<span id="cb12-7"><a aria-hidden="true" href="#cb12-7" tabindex="-1"></a>    .ipix(pixels, level)           <span class="co"># grab data by healpix indices</span></span>
+<span id="cb12-8"><a aria-hidden="true" href="#cb12-8" tabindex="-1"></a></span>
+<span id="cb12-9"><a aria-hidden="true" href="#cb12-9" tabindex="-1"></a>    <span class="co"># add filters</span></span>
+<span id="cb12-10"><a aria-hidden="true" href="#cb12-10" tabindex="-1"></a>    .flags(mask_known_source<span class="op">=</span><span class="va">False</span>)  <span class="co"># filter by flags</span></span>
+<span id="cb12-11"><a aria-hidden="true" href="#cb12-11" tabindex="-1"></a>    .wavelength(wave_min, wave_max)  <span class="co"># filter to a wavelength range</span></span>
+<span id="cb12-12"><a aria-hidden="true" href="#cb12-12" tabindex="-1"></a></span>
+<span id="cb12-13"><a aria-hidden="true" href="#cb12-13" tabindex="-1"></a>    <span class="co"># add extra output columns</span></span>
+<span id="cb12-14"><a aria-hidden="true" href="#cb12-14" tabindex="-1"></a>    .with_wavelengths()  <span class="co"># add wavelength and bandwidth columns</span></span>
+<span id="cb12-15"><a aria-hidden="true" href="#cb12-15" tabindex="-1"></a>    .with_image()        <span class="co"># add image filepath column</span></span>
+<span id="cb12-16"><a aria-hidden="true" href="#cb12-16" tabindex="-1"></a>    .with_rowcoldet()    <span class="co"># add row, column, detector columns</span></span>
+<span id="cb12-17"><a aria-hidden="true" href="#cb12-17" tabindex="-1"></a>)</span></code></pre></div><p>This produces a <code>PixelQuery</code> object. You
+                can view the SQL it will generate</p><div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a aria-hidden="true" href="#cb13-1" tabindex="-1"></a><span class="bu">print</span>(query.sql())</span></code></pre></div><p>You can directly execute the query.</p><div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a aria-hidden="true" href="#cb14-1" tabindex="-1"></a>query.execute()  <span class="co"># -&gt; returns a PyArrow Table</span></span>
+<span id="cb14-2"><a aria-hidden="true" href="#cb14-2" tabindex="-1"></a>query.execute_to_parquet(output_filepath)  <span class="co"># saves outputs to a Parquet file</span></span></code></pre></div></details><details open="True"><summary><h2 id="cookbook">Cookbook</h2></summary><p>The general approach to building a fast query is the
                 following:</p><ol type="1">
 <li>Identify and load only the relevant partitions</li>
 <li>Load the wavelength table into memory
@@ -290,20 +346,32 @@ level 6:  0b 0000 0000 0001 0000 xxxx xxxx xxxx xxxx</code></pre><p>In the <code
 
 
 
+
+
+
+
 <details open="True"><summary><h1 id="building-the-database-yourself">Building the
-                database yourself</h1></summary><p>Building the database proceeds in a few stages.</p><p>The stages are</p><ol type="1">
+                database yourself</h1></summary><p>Building the database proceeds in a few stages.</p><p>First, make sure you have your environment variables
+                set. You will need</p><ul>
+<li><code>TALLTABLE_DB_DIR</code>: tells the system
+                where to build the database</li>
+<li><code>TALLTABLE_DATA_DIR</code>: path to the
+                spectral images</li>
+<li><code>TALLTABLE_SCRATCH_DIR</code> (optional): put
+                interim files in a different location. This is good if
+                you have very fast scratch space available. Defaults to
+                <code>TALLTABLE_DB_DIR</code>.</li>
+</ul><p>The stages are</p><ol type="1">
 <li>Build the <code>waves</code> table</li>
 <li>Ingest a batch</li>
 <li>Compactify</li>
 <li>Post-compaction clean-up</li>
 <li>GOTO 2</li>
-</ol><p>Make sure you have set up your
-                <code>config.toml</code> (<a href="/#configuration">see
-                here</a>) before you start!</p><p>First, build the waves table. This is done with:</p><pre><code>uv run python scripts/build_waves.py</code></pre><p>Then, ingest some images. To ingest spectral images,
+</ol><p>First, build the waves table. This is done with:</p><pre><code>uv run python scripts/build_waves.py</code></pre><p>Then, ingest some images. To ingest spectral images,
                 we first need to identify a batch of files. Typically,
                 we ingest images in a batch of one week of released
                 data, in which case the list of files can be found with
-                something like</p><div class="sourceCode" id="cb15"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb15-1"><a aria-hidden="true" href="#cb15-1" tabindex="-1"></a><span class="fu">find</span> /path/to/level2/ <span class="at">-mindepth</span> 4 <span class="at">-maxdepth</span> 4 <span class="at">-name</span> <span class="st">"*2025W19*"</span> <span class="op">&gt;</span> batch.txt</span></code></pre></div><p>Alternatively, make <code>batch.txt</code> with all
+                something like</p><div class="sourceCode" id="cb16"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb16-1"><a aria-hidden="true" href="#cb16-1" tabindex="-1"></a><span class="fu">find</span> /path/to/level2/ <span class="at">-mindepth</span> 4 <span class="at">-maxdepth</span> 4 <span class="at">-name</span> <span class="st">"*2025W19*"</span> <span class="op">&gt;</span> batch.txt</span></code></pre></div><p>Alternatively, make <code>batch.txt</code> with all
                 files that intersect some point on sky, if you only want
                 to ingest the data in a given region. (<span class="citation" data-cites="TODO">@TODO</span>: add TAP
                 query)</p><p>Now, because Parquet (our final file format) is
@@ -333,6 +401,7 @@ srun uv run python scripts/compact.py</code></pre><p>This will break up the inge
                 our <a href="https://github.com/cmhainje/talltable/blob/main/slurm/week.sbatch">one-week
                 SLURM script</a> for an example that goes
                 end-to-end.</p></details>
+
 
 
 
