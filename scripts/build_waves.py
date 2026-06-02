@@ -6,10 +6,12 @@ from astropy.io import fits
 from glob import glob
 from tqdm import tqdm
 
-from talltable.paths import DATA_DIR, DB_DIR, WAVES_DB_PATH
-from talltable.waveid import rowcoldet_to_waveid
 from talltable.constants import ALL_ROW, ALL_COL
-from talltable.util import byteswap
+from talltable.paths import DB_DIR, WAVES_DB_PATH, require_env
+from talltable_pipeline.util import byteswap
+from talltable.waveid import rowcoldet_to_waveid
+
+DATA_DIR = require_env("TALLTABLE_DATA_DIR")
 
 
 spec_dir = DATA_DIR / "spectral_wcs/cal-wcs-v4-2025-254"

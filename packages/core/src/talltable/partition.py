@@ -1,7 +1,6 @@
 import numpy as np
 import healpy as hp
 from .constants import PART_MIN_LEVEL, PART_MAX_LEVEL
-from .paths import DB_DIR
 
 
 def part_to_level_index(part):
@@ -22,6 +21,8 @@ def level_index_to_part(level, index):
 
 
 def find_partitions_ipix(ipix, level=PART_MAX_LEVEL, all_parts=None):
+    from .paths import DB_DIR
+
     if all_parts is None:
         with open(DB_DIR / "parts.txt", "r") as f:
             all_parts = set(int(line.strip()) for line in f.readlines())

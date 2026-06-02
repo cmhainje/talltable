@@ -2,7 +2,6 @@ import io
 import json
 import requests
 import struct
-import pyarrow as pa
 import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 

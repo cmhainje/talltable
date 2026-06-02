@@ -8,11 +8,11 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from talltable.batch import CHUNK_COLUMNS
 from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
 from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import PIXEL_DB_PATH, SCRATCH_DIR
-from talltable.util import defer_interrupt
+from talltable_pipeline.util import defer_interrupt
+from talltable_pipeline.batch import CHUNK_COLUMNS
 
 
 task_id = int(os.environ.get("SLURM_PROCID", 0))

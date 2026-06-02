@@ -4,7 +4,7 @@ title: NYU SPHEREx talltable documentation
 
 # Authors
 
-This database and associated package are authored by
+This database and associated package(s) are authored by
 
 - **Connor Hainje**, NYU
 - **David W Hogg**, NYU+
@@ -12,102 +12,130 @@ This database and associated package are authored by
 Contact email: `connor <dot> hainje <at> nyu <dot> edu`
 
 
-# Getting started
+# Quick start
 
-## TL;DR
+There are three main ways to interact with the talltable.
 
-```
-# install
-git clone https://github.com/cmhainje/talltable.git
-cd talltable
-uv sync
+1. Querying the database via the web service.
+2. Querying the database locally. This requires either
+    access to the Flatiron Institute cluster where the full database lives, or 
+    for you to download the chunks of the database that you need.
+3. Building the database from the SPHEREx spectral image files yourself.
 
-# configure
-cp example_config.toml config.toml
-# <EDIT CONFIG>
+If you want to do option 3, read [Building the database yourself](/#building-the-database-yourself).
 
-# pull down (part of) the database using globus
-uv run python scripts/globus.py disc "06h33m45s" "04d59m54s" 3.0
-# <REQUIRES A GLOBUS ACCOUNT & PERMISSION, EMAIL ME>
-```
-
-## Installation
-
-The project can be installed by
+Otherwise, start by installing the core talltable package:
 
 ```
-git clone https://github.com/cmhainje/talltable.git
-cd talltable
+uv add 'talltable @ git+https://github.com/cmhainje/talltable.git#subdirectory=packages/core'
 ```
 
-Inside, there is a Python package, `talltable`, which handles building and interfacing with the database.
-Install the package and all dependencies from inside the project with
+or, if you use pip:
 
 ```
-uv sync
+pip install 'talltable @ git+https://github.com/cmhainje/talltable.git#subdirectory=packages/core'
 ```
 
-To test that it installed correctly,
+This package provides a client for the web service as well as a number of utilities that are helpful for building queries.
 
+
+## Using the web service
+
+Out of the box, you should be able to use the `PixelQuery` class to build and execute simple queries.
+
+```python
+from talltable import PixelQuery
+
+table = (
+    PixelQuery(web=True)
+    .disc(
+        98.4,  # ra [deg]
+        5.0,   # dec [deg]
+        30.0   # radius [arcmin]
+    )  
+    .with_wavelengths()
+    .execute()
+)
 ```
-uv run python -c "import talltable; print('ok!')"
-ok!
+
+More details on the `PixelQuery` class [below](/#query-builder).
+
+
+## Local queries
+
+In order to query *local* database files, you need to configure talltable so that it knows where the database lives.
+This is done with the environment variable `TALLTABLE_DB_DIR`.
+Set this however you like:
+
+- Make a `.env` file and pass it to uv whenever you run commands (`uv run --env-file .env ...`)
+- Set `export TALLTABLE_DB_DIR=/path/to/db` in your `.bashrc` or `.zshrc` (or whatever shell you used)
+- Or however else you want to manage env vars for your project.
+
+**For Flatiron users:** use `TALLTABLE_DB_DIR=/mnt/sdceph/users/spherex/talltable`.
+
+Then, you can use the `PixelQuery` class to build and execute simple queries.
+
+```python
+from talltable import PixelQuery
+
+table = (
+    PixelQuery(web=False)
+    .disc(
+        98.4,  # ra [deg]
+        5.0,   # dec [deg]
+        30.0   # radius [arcmin]
+    )  
+    .with_wavelengths()
+    .execute()
+)
 ```
-
-
-## Configuration
-
-Next, you need to make a `config.toml` directory in the project root.
-There's an example; copy it:
-
-```
-cp example_config.toml config.toml
-```
-
-and then replace the paths with your own.
-
-- `data_dir` is only needed if you're going to download raw SPHEREx FITS files and use it to build the database yourself. (Set to a dummy path if you don't need it.)
-- `db_dir` is where the database files live.
-- `scratch_dir` is where transient files produced during ingestion live. (Unless you have reason to do something else, make this a dummy path or set it to the same path as `db_dir`.)
 
 
 # Access
 
-If you only want to *use* the database (and not build it yourself), there are several ways to do so.
+There are several ways to access the database, as hinted at above.
+
+## Web service
+
+There is a web service at `https://talltable.flatironinstitute.org`.
+It has only a handful of endpoints, and requires use via the client provided in the `talltable` package.
+The web service has fairly strict compute, memory, and time limits on queries.
+If you want to run large queries, you may be better serviced by downloading parts of the pre-built database yourself!
+
+
+## Downloading chunks for local use
+
+The database is split into chunks based called 'partitions', which individually are Parquet files.
+The scheme for deciding on these partitions is described [below](/#partitions);
+briefly, the sky is partitioned by adaptively-refined HEALPix indices.
+We provide a few methods to download partitions in their entirety.
+
+1. Download the files from
+    [https://sdsc-users.flatironinstitute.org/~chainje/talltable/](https://sdsc-users.flatironinstitute.org/~chainje/talltable/).
+    These can be downloaded with curl or wget or whatever you like.
+2. We are set up on Globus! This requires permissions, email me for access.
+
+**Important:** if you are downloading a part of the database for local use, you need to
+
+- Also download the files `parts.txt`, `image.parquet`, and `waves.parquet`
+- Replicate the directory structure within the database directory exactly
+- Specify via environment variable (`TALLTABLE_DB_DIR`) the path to your local database files
+
+There is a script, `scripts/globus.py`, which handles everything for you.
+You just need to specify the database directory environment variable and provide a region on sky;
+the script computes which partitions to pull down and makes sure everything is in the right place.
+
 
 ## Popeye cluster
 
 If you are a researcher at the Flatiron Institute with access to the Popeye cluster, the files are all available locally!
-Set the following in your `config.toml`:
+Set the following environment variable:
 
-```toml
-[paths]
-data_dir    = "/mnt/sdceph/users/spherex/spherex_data_qr2"
-db_dir      = "/mnt/sdceph/users/spherex/talltable"
-scratch_dir = "/mnt/sdceph/users/spherex/talltable"
+```
+TALLTABLE_DB_DIR=/mnt/sdceph/users/spherex/talltable
 ```
 
-## Globus
-
-Our pre-built version of the database is also available on Globus.
-You will need permissions in Globus: email me for access.
-
-You don't need to download all of the database; to execute queries, you only need
-`parts.txt`, `image.parquet`, `waves.parquet`,
-and whichever partitions in `pixels` are relevant to your region on sky.
-
-The script `scripts/globus.py` automates this download.
-You define a sky region as a disc or rectangle (centered at some RA/Dec with some radius or width/height), or give a list of HEALPix indices.
-The script then downloads only the necessary partitions, putting them into the `db_dir` specified in your config.
-This script is good for relatively small downloads; let me know if you're trying to pull down a large fraction of the data, and we can find a better solution.
-
-
-## Web service
-
-We will (soon) release a public web service with an endpoint to execute SQL queries against the database.
-Note that this *will* be limited with relatively stringent timeouts.
-If you are doing heavy analysis in your queries, or if you are making a large number of queries on one region, you will be better served by pulling down the chunks of the database you need from Globus.
-
+You should be good to go.
 
 
 # Schema
@@ -131,7 +159,7 @@ waves: {
 We provide utilities in the `talltable` package for translating between `waveid` and detector, row, column.
 
 ```python
->>> from talltable.waveid import rowcoldet_to_waveid, waveid_to_rowcoldet
+>>> from talltable import rowcoldet_to_waveid, waveid_to_rowcoldet
 >>> rowcoldet_to_waveid(479, 1831, 3)
 52295463
 >>> waveid_to_rowcoldet(52295463)
@@ -142,14 +170,16 @@ We provide utilities in the `talltable` package for translating between `waveid`
 ## Images
 
 The **images** table stores image metadata.
-Its filename is `images.parquet`.
+Its filename is `image.parquet`.
 The table schema is 
 
 ```
 images: {
-    imageid:  int
+    imageid:  int64
     filepath: str
-    @TODO
+    obsid:    str
+    t_beg:    float64
+    t_end:    float64
 }
 ```
 
@@ -174,7 +204,7 @@ pixels: {
 
 Details about each column are as follows:
 
-- `hphigh` : a very level 22 HEALPix index giving the position on sky of the pixel.
+- `hphigh` : a level 22 HEALPix index giving the position on sky of the pixel.
 - `flux`: the value of this pixel in the `"IMAGE"` layer of the spectral image file. Units: MJy/sr.
 - `zodi`: the value of this pixel in the `"ZODI"` layer of the spectral image file. Units: MJy/sr.
 - `variance`: the value of this pixel in the `"VARIANCE"` layer of the spectral image file. Units: (MJy/sr)$^2$.
@@ -218,14 +248,6 @@ In the `talltable` package, we provide simple utitlity functions for translating
 (6, 12345)
 ```
 
-We also provide a utility for finding the partition in the database which contains a point on sky (expects RA/Dec in degrees).
-
-```python
->>> from talltable.partition import find_partition
->>> find_partition(350, 5)
-@TODO: output
-```
-
 For larger queries, sometimes it can be useful to know all the partitions that have been created and at what levels.
 We store this information in `parts.txt`, which contains all the partition numbers separated by newlines.
 
@@ -234,9 +256,45 @@ We store this information in `parts.txt`, which contains all the partition numbe
 
 ## Query builder
 
-We will (soon) release a query builder which constructs common kinds of queries with the fastest structure that we know of.
+In the core `talltable` package, we provide a query builder called `PixelQuery`.
+It can be used to query the web service or local files.
+Here are all the features it supports:
 
-@TODO: add documentation
+```python
+query = (
+    PixelQuery(web=True)  # or web=False if using local data
+
+    # set a region using one of these three (required)
+    .disc(ra, dec, radius)         # cone search
+    .rect(ra, dec, width, height)  # rect search
+    .ipix(pixels, level)           # grab data by healpix indices
+
+    # add filters
+    .flags(mask_known_source=False)  # filter by flags
+    .wavelength(wave_min, wave_max)  # filter to a wavelength range
+
+    # add extra output columns
+    .with_wavelengths()  # add wavelength and bandwidth columns
+    .with_image()        # add image filepath column
+    .with_rowcoldet()    # add row, column, detector columns
+)
+
+```
+
+This produces a `PixelQuery` object. You can view the SQL it will generate
+
+```python
+print(query.sql())
+```
+
+You can directly execute the query.
+
+```python
+query.execute()  # -> returns a PyArrow Table
+query.execute_to_parquet(output_filepath)  # saves outputs to a Parquet file
+```
+
+
 
 
 ## Cookbook
@@ -255,6 +313,14 @@ The general approach to building a fast query is the following:
 
 Building the database proceeds in a few stages.
 
+First, make sure you have your environment variables set. You will need
+
+- `TALLTABLE_DB_DIR`: tells the system where to build the database
+- `TALLTABLE_DATA_DIR`: path to the spectral images
+- `TALLTABLE_SCRATCH_DIR` (optional): put interim files in a different location.
+    This is good if you have very fast scratch space available.
+    Defaults to `TALLTABLE_DB_DIR`.
+
 The stages are
 
 1. Build the `waves` table
@@ -262,8 +328,6 @@ The stages are
 3. Compactify
 4. Post-compaction clean-up
 5. GOTO 2
-
-Make sure you have set up your `config.toml` ([see here](/#configuration)) before you start!
 
 First, build the waves table. This is done with:
 

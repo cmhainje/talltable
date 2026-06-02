@@ -1,0 +1,22 @@
+[project]
+name = "talltable-server"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+authors = [
+    { name = "Connor Hainje", email = "cmhainje@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb (>=1.4.1,<2.0.0)",
+    "pyarrow (>=21.0.0,<22.0.0)",
+    "fastapi[standard]>=0.136.1",
+    "sqlglot>=30.7.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+talltable = { workspace = true }

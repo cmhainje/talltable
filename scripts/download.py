@@ -15,7 +15,9 @@ from requests import get, Session
 from os.path import basename
 from tqdm.auto import tqdm
 
-from talltable.paths import DATA_DIR
+from talltable.paths import require_env
+
+DATA_DIR = require_env("TALLTABLE_DATA_DIR")
 
 
 def parse():

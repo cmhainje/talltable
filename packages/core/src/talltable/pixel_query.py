@@ -8,7 +8,6 @@ from pathlib import Path
 
 from talltable.constants import HP_HIGH_LEVEL, SERVICE_URL
 from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix
-from talltable.paths import PART_DB_PATH, PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
 from talltable.query import choose_filter_level, indices_to_hphigh_ranges
 
 
@@ -72,6 +71,16 @@ def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
 
 class PixelQuery:
     def __init__(self, web: bool = False, base_url: str = SERVICE_URL):
+        if not web:
+            try:
+                from talltable import paths as _
+            except RuntimeError:
+                raise RuntimeError(
+                    "PixelQuery() requires local database configuration (TALLTABLE_DB_DIR). "
+                    "See example.env or https://connorhainje.com/talltable for setup instructions.\n\n"
+                    "Note: if you want to query the web service instead, use PixelQuery(web=True). "
+                    "No local setup needed."
+                ) from None
         self._web = web
         self._base_url = base_url.rstrip("/")
         self._region = None
@@ -79,7 +88,6 @@ class PixelQuery:
         self._flags_sql = f"(flags & ~({_KNOWN_SOURCE_BIT})) = 0"
         self._with_rowcoldet = False
         self._with_image = False
-        self._with_radec = False
         self._with_wavelengths = False
 
     # --- region ---
@@ -142,11 +150,6 @@ class PixelQuery:
         self._with_image = True
         return self
 
-    def with_radec(self) -> PixelQuery:
-        """Add ra, dec columns computed from hphigh (applied client-side after execute)."""
-        self._with_radec = True
-        return self
-
     def with_wavelengths(self) -> PixelQuery:
         """Join against the waves table to include wavelength and bandwidth for each pixel."""
         self._with_wavelengths = True
@@ -164,6 +167,7 @@ class PixelQuery:
             return self._local_partitions()
 
     def _local_partitions(self) -> list[int]:
+        from talltable.paths import PART_DB_PATH
         with open(PART_DB_PATH) as f:
             all_parts = set(int(line.strip()) for line in f)
         kind = self._region[0]
@@ -215,6 +219,7 @@ class PixelQuery:
         return self._build_sql("pixels", "waves", "images")
 
     def _local_sql(self, parts: list[int]) -> str:
+        from talltable.paths import PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
         paths = [f"'{PIXEL_DB_PATH / f'part={p}/compacted.parquet'}'" for p in parts]
         if len(paths) == 1:
             pixel_source = f"read_parquet({paths[0]})"
@@ -312,7 +317,7 @@ class PixelQuery:
         parts = self.partitions()
         if self._web:
             from talltable.client import fetch_arrow_stream
-            table = fetch_arrow_stream(
+            return fetch_arrow_stream(
                 f"{self._base_url}/sql",
                 {"query": self.sql(), "partitions": parts},
             )
@@ -320,21 +325,12 @@ class PixelQuery:
             import duckdb
             con = duckdb.connect()
             try:
-                table = con.execute(self._local_sql(parts)).fetch_arrow_table()
+                return con.execute(self._local_sql(parts)).fetch_arrow_table()
             finally:
                 con.close()
 
-        if self._with_radec:
-            table = _add_radec(table)
-        return table
-
     def execute_to_parquet(self, output: str | Path) -> None:
         """Run the query and stream the result directly to a Parquet file."""
-        if self._with_radec:
-            raise ValueError(
-                "with_radec() is not supported with execute_to_parquet(); "
-                "use execute() instead and write the table manually."
-            )
         parts = self.partitions()
         if self._web:
             from talltable.client import fetch_arrow_to_parquet
@@ -362,12 +358,3 @@ class PixelQuery:
                 con.close()
 
 
-def _add_radec(table: pa.Table) -> pa.Table:
-    nside = 2 ** HP_HIGH_LEVEL
-    ipix = table["hphigh"].to_pylist()
-    ra, dec = hp.pix2ang(nside, ipix, nest=True, lonlat=True)
-    return (
-        table
-        .append_column("ra", pa.array(ra, type=pa.float64()))
-        .append_column("dec", pa.array(dec, type=pa.float64()))
-    )
