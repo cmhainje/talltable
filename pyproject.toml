@@ -1,3 +1,18 @@
+[project]
+name = "talltable-workspace"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "talltable",
+    "talltable-pipeline",
+    "talltable-server",
+]
+
+[tool.uv.sources]
+talltable = { workspace = true }
+talltable-pipeline = { workspace = true }
+talltable-server = { workspace = true }
+
 [tool.uv.workspace]
 members = [
     "packages/core",
@@ -18,5 +33,6 @@ dev = [
     "astroquery (>=0.4.10,<0.5.0)",
     "boto3 (>=1.40.60,<2.0.0)",
     "globus-sdk>=4.5.0",
+    "pandas>=3.0.3",
 ]
 
