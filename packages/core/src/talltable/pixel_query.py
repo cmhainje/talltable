@@ -88,7 +88,6 @@ class PixelQuery:
         self._flags_sql = f"(flags & ~({_KNOWN_SOURCE_BIT})) = 0"
         self._with_rowcoldet = False
         self._with_image = False
-        self._with_radec = False
         self._with_wavelengths = False
 
     # --- region ---
@@ -149,11 +148,6 @@ class PixelQuery:
     def with_image(self) -> PixelQuery:
         """Join against the images table to include filepath for each pixel."""
         self._with_image = True
-        return self
-
-    def with_radec(self) -> PixelQuery:
-        """Add ra, dec columns computed from hphigh (applied client-side after execute)."""
-        self._with_radec = True
         return self
 
     def with_wavelengths(self) -> PixelQuery:
@@ -323,7 +317,7 @@ class PixelQuery:
         parts = self.partitions()
         if self._web:
             from talltable.client import fetch_arrow_stream
-            table = fetch_arrow_stream(
+            return fetch_arrow_stream(
                 f"{self._base_url}/sql",
                 {"query": self.sql(), "partitions": parts},
             )
@@ -331,21 +325,12 @@ class PixelQuery:
             import duckdb
             con = duckdb.connect()
             try:
-                table = con.execute(self._local_sql(parts)).fetch_arrow_table()
+                return con.execute(self._local_sql(parts)).fetch_arrow_table()
             finally:
                 con.close()
 
-        if self._with_radec:
-            table = _add_radec(table)
-        return table
-
     def execute_to_parquet(self, output: str | Path) -> None:
         """Run the query and stream the result directly to a Parquet file."""
-        if self._with_radec:
-            raise ValueError(
-                "with_radec() is not supported with execute_to_parquet(); "
-                "use execute() instead and write the table manually."
-            )
         parts = self.partitions()
         if self._web:
             from talltable.client import fetch_arrow_to_parquet
@@ -373,12 +358,3 @@ class PixelQuery:
                 con.close()
 
 
-def _add_radec(table: pa.Table) -> pa.Table:
-    nside = 2 ** HP_HIGH_LEVEL
-    ipix = table["hphigh"].to_pylist()
-    ra, dec = hp.pix2ang(nside, ipix, nest=True, lonlat=True)
-    return (
-        table
-        .append_column("ra", pa.array(ra, type=pa.float64()))
-        .append_column("dec", pa.array(dec, type=pa.float64()))
-    )
