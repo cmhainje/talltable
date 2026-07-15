@@ -5,11 +5,13 @@ import json
 import logging
 import os
 import pyarrow.ipc as ipc
+import secrets
+import signal
 import struct
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, model_validator
@@ -27,6 +29,7 @@ from talltable.paths import IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB
 TMP_DB_PATH = Path("temp.duckdb")
 TIMEOUT_SEC = 90.0
 PARTS_RELOAD_SEC = float(os.environ.get("TALLTABLE_PARTS_RELOAD_SEC", 3600))
+RESTART_TOKEN = os.environ.get("TALLTABLE_RESTART_TOKEN")
 
 FRAME_DATA = 0x00
 FRAME_STATUS = 0x01
@@ -129,6 +132,25 @@ def get_con():
 @app.head("/")
 def status():
     return {"service": "talltable simple web service", "status": "running ok!"}
+
+
+@app.post("/restart")
+async def restart(authorization: str | None = Header(default=None)):
+    scheme, _, token = (authorization or "").partition(" ")
+    if (
+        not RESTART_TOKEN
+        or scheme.lower() != "bearer"
+        or not token
+        or not secrets.compare_digest(token, RESTART_TOKEN)
+    ):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    async def _delayed_terminate():
+        await asyncio.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_delayed_terminate())
+    return {"ok": True, "message": "restarting"}
 
 
 # *** SQL ***
