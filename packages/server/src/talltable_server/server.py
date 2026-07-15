@@ -159,9 +159,12 @@ async def restart(authorization: str | None = Header(default=None)):
 prefetch_sem = asyncio.Semaphore(2)
 
 def warm(path):
-    with open(path, 'rb') as f:
-        while f.read(4*1024*1024):
-            pass
+    try:
+        with open(path, 'rb') as f:
+            while f.read(4*1024*1024):
+                pass
+    except OSError as e:
+        raise ValueError(f"could not read partition file {path}: {e}") from e
 
 async def prefetch_files(paths, max_workers=16):
     async with prefetch_sem:
@@ -262,35 +265,31 @@ def arrow_stream(
         reader = con.execute(sql, params or []).fetch_record_batch(batch_rows)
         sink = io.BytesIO()
         writer = ipc.new_stream(sink, reader.schema)
-        try:
-            for batch in reader:
-                writer.write_batch(batch)
-                data = sink.getvalue()
-                if data:
-                    yield _frame(data)
-                sink.seek(0)
-                sink.truncate(0)
-            writer.close()
-            tail = sink.getvalue()
-            if tail:
-                yield _frame(tail)
-            yield _status_frame(True)
-        except duckdb.Error as e:
-            yield _status_frame(False, str(e))
+        for batch in reader:
+            writer.write_batch(batch)
+            data = sink.getvalue()
+            if data:
+                yield _frame(data)
+            sink.seek(0)
+            sink.truncate(0)
+        writer.close()
+        tail = sink.getvalue()
+        if tail:
+            yield _frame(tail)
+        yield _status_frame(True)
     except duckdb.Error as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        yield _status_frame(False, str(e))
     finally:
         con.close()
 
 
 @app.post("/sql")
 async def sql(req: SQLRequest):
-    con = get_con()
-
     if req.partitions is not None:
         paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
         await prefetch_files(paths)
 
+    con = get_con()
     return StreamingResponse(
         stream_with_timeout(
             arrow_stream(req.into_sql(), con),
@@ -304,43 +303,37 @@ async def sql(req: SQLRequest):
 def json_stream(
     sql: str, con: duckdb.DuckDBPyConnection, params=None, batch_rows: int = 10_000
 ):
+    yield '{"batches":['
     try:
         reader = con.execute(sql, params or []).fetch_record_batch(batch_rows)
         col_names = reader.schema.names
 
-        yield '{"batches":['
-
         first_batch = True
-        try:
-            for batch in reader:
-                parts = {
-                    name: batch.column(i).to_pylist()
-                    for i, name in enumerate(col_names)
-                }
-                batch_str = json.dumps(parts, default=str)
-                if not first_batch:
-                    batch_str = "," + batch_str
-                first_batch = False
-                yield batch_str
+        for batch in reader:
+            parts = {
+                name: batch.column(i).to_pylist()
+                for i, name in enumerate(col_names)
+            }
+            batch_str = json.dumps(parts, default=str)
+            if not first_batch:
+                batch_str = "," + batch_str
+            first_batch = False
+            yield batch_str
 
-            yield '], "message": null}'
-        except duckdb.Error as e:
-            yield f'], "message": {json.dumps(str(e))}}}'
-
+        yield '], "message": null}'
     except duckdb.Error as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        yield f'], "message": {json.dumps(str(e))}}}'
     finally:
         con.close()
 
 
 @app.post("/sql.json")
 async def sql_json(req: SQLRequest):
-    con = get_con()
-
     if req.partitions is not None:
         paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
         await prefetch_files(paths)
 
+    con = get_con()
     return StreamingResponse(
         stream_with_timeout(
             json_stream(req.into_sql(), con),
