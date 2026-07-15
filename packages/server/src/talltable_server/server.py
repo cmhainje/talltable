@@ -74,6 +74,14 @@ async def memory_error_handler(request: Request, exc: MemoryError):
     )
 
 
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    request
+    return JSONResponse(
+        status_code=422, content={"detail": f"Request could not be processed. Error message:\n{exc}"}
+    )
+
+
 def get_con():
     return duckdb.connect(
         TMP_DB_PATH,
@@ -131,7 +139,7 @@ class SQLRequest(BaseModel):
 
     @model_validator(mode="after")
     def partitions_required_for_pixels(self) -> "SQLRequest":
-        if uses_pixels(self.query) and self.partitions is None:
+        if uses_pixels(self.query) and not self.partitions:
             raise ValueError("partitions must be provided when query contains 'pixels'")
         return self
 
