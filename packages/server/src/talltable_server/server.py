@@ -2,6 +2,7 @@ import asyncio
 import duckdb
 import io
 import json
+import logging
 import os
 import pyarrow.ipc as ipc
 import struct
@@ -25,9 +26,12 @@ from talltable.paths import IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB
 
 TMP_DB_PATH = Path("temp.duckdb")
 TIMEOUT_SEC = 90.0
+PARTS_RELOAD_SEC = float(os.environ.get("TALLTABLE_PARTS_RELOAD_SEC", 3600))
 
 FRAME_DATA = 0x00
 FRAME_STATUS = 0x01
+
+logger = logging.getLogger(__name__)
 
 
 def _frame(data: bytes, frame_type: int = FRAME_DATA) -> bytes:
@@ -41,8 +45,25 @@ def _status_frame(ok: bool, message: str | None = None) -> bytes:
     return _frame(json.dumps(payload).encode(), FRAME_STATUS)
 
 
-with open(PART_DB_PATH, "r") as f:
-    ALL_PARTS = set(int(line.strip()) for line in f.readlines())
+def _read_all_parts() -> set[int]:
+    with open(PART_DB_PATH, "r") as f:
+        return set(int(line.strip()) for line in f.readlines())
+
+
+ALL_PARTS = _read_all_parts()
+
+
+async def _reload_all_parts_periodically():
+    global ALL_PARTS
+    while True:
+        await asyncio.sleep(PARTS_RELOAD_SEC)
+        try:
+            new_parts = await asyncio.to_thread(_read_all_parts)
+        except OSError:
+            logger.exception("failed to reload parts.txt; keeping previous ALL_PARTS")
+            continue
+        ALL_PARTS = new_parts
+        logger.info(f"reloaded ALL_PARTS: {len(ALL_PARTS)} partitions")
 
 
 @asynccontextmanager
@@ -55,9 +76,17 @@ async def lifespan(app: FastAPI):
         con.execute(f"CREATE TABLE waves AS FROM read_parquet('{WAVES_DB_PATH}')")
         con.execute(f"CREATE TABLE images AS FROM read_parquet('{IMAGE_DB_PATH}')")
 
+    reload_task = asyncio.create_task(_reload_all_parts_periodically())
+
     yield
 
     # teardown
+    reload_task.cancel()
+    try:
+        await reload_task
+    except asyncio.CancelledError:
+        pass
+
     TMP_DB_PATH.unlink(missing_ok=True)
     TMP_DB_PATH.with_suffix(".duckdb.wal").unlink(missing_ok=True)
 
