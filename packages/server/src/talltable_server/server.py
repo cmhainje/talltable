@@ -115,7 +115,7 @@ async def value_error_handler(request: Request, exc: ValueError):
 
 
 def get_con():
-    return duckdb.connect(
+    con = duckdb.connect(
         TMP_DB_PATH,
         read_only=True,
         config={
@@ -123,6 +123,9 @@ def get_con():
             "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "16GB"),
         },
     )
+    con.execute(f"SET allowed_directories=['{PIXEL_DB_PATH}']")
+    con.execute("SET enable_external_access=false")
+    return con
 
 
 # *** STATUS ***
