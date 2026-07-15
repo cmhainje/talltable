@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, model_validator
 from sqlglot import parse_one, exp
+from sqlglot.errors import ParseError
 
 from talltable.partition import (
     find_partitions_ipix,
@@ -110,8 +111,15 @@ async def prefetch_files(paths, max_workers=16):
             await asyncio.gather(*[loop.run_in_executor(ex, warm, p) for p in paths])
 
 
+def parse_sql(sql):
+    try:
+        return parse_one(sql, read="duckdb")
+    except ParseError as e:
+        raise ValueError(str(e))
+
+
 def uses_pixels(sql):
-    for table in parse_one(sql, read="duckdb").find_all(exp.Table):
+    for table in parse_sql(sql).find_all(exp.Table):
         if table.name == "pixels":
             return True
     return False
@@ -140,7 +148,7 @@ class SQLRequest(BaseModel):
 
         def transformer(node):
             if isinstance(node, exp.Table) and node.name == "pixels":
-                repl = parse_one(f"read_parquet({partition_sql})", read="duckdb")
+                repl = parse_sql(f"read_parquet({partition_sql})")
                 alias = node.args.get("alias")
                 if alias:
                     return exp.Alias(this=repl, alias=alias)
@@ -148,7 +156,7 @@ class SQLRequest(BaseModel):
             return node
 
         return (
-            parse_one(self.query, read="duckdb")
+            parse_sql(self.query)
             .transform(transformer)
             .sql(dialect="duckdb")
         )
