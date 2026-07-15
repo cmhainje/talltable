@@ -17,6 +17,7 @@ from pathlib import Path
 from pydantic import BaseModel, model_validator
 from sqlglot import parse_one, exp
 from sqlglot.errors import ParseError
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from talltable.partition import (
     find_partitions_ipix,
@@ -30,6 +31,7 @@ TMP_DB_PATH = Path("temp.duckdb")
 TIMEOUT_SEC = 90.0
 PARTS_RELOAD_SEC = float(os.environ.get("TALLTABLE_PARTS_RELOAD_SEC", 3600))
 RESTART_TOKEN = os.environ.get("TALLTABLE_RESTART_TOKEN")
+MAX_BODY_SIZE = 500 * 1024 * 1024  # 500 MB
 
 FRAME_DATA = 0x00
 FRAME_STATUS = 0x01
@@ -94,7 +96,18 @@ async def lifespan(app: FastAPI):
     TMP_DB_PATH.with_suffix(".duckdb.wal").unlink(missing_ok=True)
 
 
+class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413, content={"detail": "Request body too large"}
+            )
+        return await call_next(request)
+
+
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(MaxBodySizeMiddleware)
 executor = ThreadPoolExecutor(max_workers=10)
 
 
