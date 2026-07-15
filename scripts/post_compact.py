@@ -4,7 +4,7 @@ import pyarrow.parquet as pq
 
 from pathlib import Path
 
-from talltable.paths import PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR, PART_DB_PATH, SCRATCH_DIR
+from talltable.paths import DB_DIR, PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR, PART_DB_PATH, SCRATCH_DIR
 
 
 logging.basicConfig(
@@ -76,8 +76,10 @@ def write_parts_list():
     partitions = sorted(
         [p.stem.split("=")[1] for p in PIXEL_DB_PATH.glob("part=*")], key=int
     )
-    with open(PART_DB_PATH, "w") as f:
+    tmp_path = DB_DIR / "parts-tmp.txt"
+    with open(tmp_path, "w") as f:
         f.write("\n".join(p for p in partitions))
+    tmp_path.replace(PART_DB_PATH)
     logger.info(f"found {len(partitions)} partitions, wrote to {PART_DB_PATH}")
 
 

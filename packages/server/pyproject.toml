@@ -10,7 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "duckdb (>=1.4.1,<2.0.0)",
     "pyarrow (>=21.0.0,<22.0.0)",
-    "fastapi[standard]>=0.136.1",
+    "fastapi>=0.136.1",
+    "uvicorn[standard]>=0.34.0",
     "sqlglot>=30.7.0",
 ]
 

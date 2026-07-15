@@ -2,17 +2,22 @@ import asyncio
 import duckdb
 import io
 import json
+import logging
 import os
 import pyarrow.ipc as ipc
+import secrets
+import signal
 import struct
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
 from pydantic import BaseModel, model_validator
 from sqlglot import parse_one, exp
+from sqlglot.errors import ParseError
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from talltable.partition import (
     find_partitions_ipix,
@@ -24,9 +29,14 @@ from talltable.paths import IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB
 
 TMP_DB_PATH = Path("temp.duckdb")
 TIMEOUT_SEC = 90.0
+PARTS_RELOAD_SEC = float(os.environ.get("TALLTABLE_PARTS_RELOAD_SEC", 3600))
+RESTART_TOKEN = os.environ.get("TALLTABLE_RESTART_TOKEN")
+MAX_BODY_SIZE = 500 * 1024 * 1024  # 500 MB
 
 FRAME_DATA = 0x00
 FRAME_STATUS = 0x01
+
+logger = logging.getLogger("uvicorn")
 
 
 def _frame(data: bytes, frame_type: int = FRAME_DATA) -> bytes:
@@ -40,8 +50,25 @@ def _status_frame(ok: bool, message: str | None = None) -> bytes:
     return _frame(json.dumps(payload).encode(), FRAME_STATUS)
 
 
-with open(PART_DB_PATH, "r") as f:
-    ALL_PARTS = set(int(line.strip()) for line in f.readlines())
+def _read_all_parts() -> set[int]:
+    with open(PART_DB_PATH, "r") as f:
+        return set(int(line.strip()) for line in f.readlines())
+
+
+ALL_PARTS = _read_all_parts()
+
+
+async def _reload_all_parts_periodically():
+    global ALL_PARTS
+    while True:
+        await asyncio.sleep(PARTS_RELOAD_SEC)
+        try:
+            new_parts = await asyncio.to_thread(_read_all_parts)
+        except OSError:
+            logger.exception("failed to reload parts.txt; keeping previous ALL_PARTS")
+            continue
+        ALL_PARTS = new_parts
+        logger.info(f"reloaded ALL_PARTS: {len(ALL_PARTS)} partitions")
 
 
 @asynccontextmanager
@@ -54,14 +81,33 @@ async def lifespan(app: FastAPI):
         con.execute(f"CREATE TABLE waves AS FROM read_parquet('{WAVES_DB_PATH}')")
         con.execute(f"CREATE TABLE images AS FROM read_parquet('{IMAGE_DB_PATH}')")
 
+    reload_task = asyncio.create_task(_reload_all_parts_periodically())
+
     yield
 
     # teardown
+    reload_task.cancel()
+    try:
+        await reload_task
+    except asyncio.CancelledError:
+        pass
+
     TMP_DB_PATH.unlink(missing_ok=True)
     TMP_DB_PATH.with_suffix(".duckdb.wal").unlink(missing_ok=True)
 
 
+class MaxBodySizeMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length is not None and int(content_length) > MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413, content={"detail": "Request body too large"}
+            )
+        return await call_next(request)
+
+
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(MaxBodySizeMiddleware)
 executor = ThreadPoolExecutor(max_workers=10)
 
 
@@ -73,15 +119,30 @@ async def memory_error_handler(request: Request, exc: MemoryError):
     )
 
 
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError):
+    request
+    return JSONResponse(
+        status_code=422, content={"detail": f"Request could not be processed. Error message:\n{exc}"}
+    )
+
+
 def get_con():
-    return duckdb.connect(
+    con = duckdb.connect(
         TMP_DB_PATH,
         read_only=True,
         config={
             "threads": int(os.environ.get("DUCKDB_THREADS", 16)),
             "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "16GB"),
+            "autoload_known_extensions": False,
+            "autoinstall_known_extensions": False,
+            "allow_community_extensions": False,
         },
     )
+    con.execute(f"SET allowed_directories=['{PIXEL_DB_PATH}']")
+    con.execute("SET enable_external_access=false")
+    con.execute("SET lock_configuration=true")
+    return con
 
 
 # *** STATUS ***
@@ -93,15 +154,37 @@ def status():
     return {"service": "talltable simple web service", "status": "running ok!"}
 
 
+@app.post("/restart")
+async def restart(authorization: str | None = Header(default=None)):
+    scheme, _, token = (authorization or "").partition(" ")
+    if (
+        not RESTART_TOKEN
+        or scheme.lower() != "bearer"
+        or not token
+        or not secrets.compare_digest(token, RESTART_TOKEN)
+    ):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    async def _delayed_terminate():
+        await asyncio.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    asyncio.create_task(_delayed_terminate())
+    return {"ok": True, "message": "restarting"}
+
+
 # *** SQL ***
 
 
 prefetch_sem = asyncio.Semaphore(2)
 
 def warm(path):
-    with open(path, 'rb') as f:
-        while f.read(4*1024*1024):
-            pass
+    try:
+        with open(path, 'rb') as f:
+            while f.read(4*1024*1024):
+                pass
+    except OSError as e:
+        raise ValueError(f"could not read partition file {path}: {e}") from e
 
 async def prefetch_files(paths, max_workers=16):
     async with prefetch_sem:
@@ -110,8 +193,15 @@ async def prefetch_files(paths, max_workers=16):
             await asyncio.gather(*[loop.run_in_executor(ex, warm, p) for p in paths])
 
 
+def parse_sql(sql):
+    try:
+        return parse_one(sql, read="duckdb")
+    except ParseError as e:
+        raise ValueError(str(e))
+
+
 def uses_pixels(sql):
-    for table in parse_one(sql, read="duckdb").find_all(exp.Table):
+    for table in parse_sql(sql).find_all(exp.Table):
         if table.name == "pixels":
             return True
     return False
@@ -123,7 +213,7 @@ class SQLRequest(BaseModel):
 
     @model_validator(mode="after")
     def partitions_required_for_pixels(self) -> "SQLRequest":
-        if uses_pixels(self.query) and self.partitions is None:
+        if uses_pixels(self.query) and not self.partitions:
             raise ValueError("partitions must be provided when query contains 'pixels'")
         return self
 
@@ -140,7 +230,7 @@ class SQLRequest(BaseModel):
 
         def transformer(node):
             if isinstance(node, exp.Table) and node.name == "pixels":
-                repl = parse_one(f"read_parquet({partition_sql})", read="duckdb")
+                repl = parse_sql(f"read_parquet({partition_sql})")
                 alias = node.args.get("alias")
                 if alias:
                     return exp.Alias(this=repl, alias=alias)
@@ -148,7 +238,7 @@ class SQLRequest(BaseModel):
             return node
 
         return (
-            parse_one(self.query, read="duckdb")
+            parse_sql(self.query)
             .transform(transformer)
             .sql(dialect="duckdb")
         )
@@ -195,35 +285,31 @@ def arrow_stream(
         reader = con.execute(sql, params or []).fetch_record_batch(batch_rows)
         sink = io.BytesIO()
         writer = ipc.new_stream(sink, reader.schema)
-        try:
-            for batch in reader:
-                writer.write_batch(batch)
-                data = sink.getvalue()
-                if data:
-                    yield _frame(data)
-                sink.seek(0)
-                sink.truncate(0)
-            writer.close()
-            tail = sink.getvalue()
-            if tail:
-                yield _frame(tail)
-            yield _status_frame(True)
-        except duckdb.Error as e:
-            yield _status_frame(False, str(e))
+        for batch in reader:
+            writer.write_batch(batch)
+            data = sink.getvalue()
+            if data:
+                yield _frame(data)
+            sink.seek(0)
+            sink.truncate(0)
+        writer.close()
+        tail = sink.getvalue()
+        if tail:
+            yield _frame(tail)
+        yield _status_frame(True)
     except duckdb.Error as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        yield _status_frame(False, str(e))
     finally:
         con.close()
 
 
 @app.post("/sql")
 async def sql(req: SQLRequest):
-    con = get_con()
-
     if req.partitions is not None:
         paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
         await prefetch_files(paths)
 
+    con = get_con()
     return StreamingResponse(
         stream_with_timeout(
             arrow_stream(req.into_sql(), con),
@@ -237,43 +323,37 @@ async def sql(req: SQLRequest):
 def json_stream(
     sql: str, con: duckdb.DuckDBPyConnection, params=None, batch_rows: int = 10_000
 ):
+    yield '{"batches":['
     try:
         reader = con.execute(sql, params or []).fetch_record_batch(batch_rows)
         col_names = reader.schema.names
 
-        yield '{"batches":['
-
         first_batch = True
-        try:
-            for batch in reader:
-                parts = {
-                    name: batch.column(i).to_pylist()
-                    for i, name in enumerate(col_names)
-                }
-                batch_str = json.dumps(parts, default=str)
-                if not first_batch:
-                    batch_str = "," + batch_str
-                first_batch = False
-                yield batch_str
+        for batch in reader:
+            parts = {
+                name: batch.column(i).to_pylist()
+                for i, name in enumerate(col_names)
+            }
+            batch_str = json.dumps(parts, default=str)
+            if not first_batch:
+                batch_str = "," + batch_str
+            first_batch = False
+            yield batch_str
 
-            yield '], "message": null}'
-        except duckdb.Error as e:
-            yield f'], "message": {json.dumps(str(e))}}}'
-
+        yield '], "message": null}'
     except duckdb.Error as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        yield f'], "message": {json.dumps(str(e))}}}'
     finally:
         con.close()
 
 
 @app.post("/sql.json")
 async def sql_json(req: SQLRequest):
-    con = get_con()
-
     if req.partitions is not None:
         paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
         await prefetch_files(paths)
 
+    con = get_con()
     return StreamingResponse(
         stream_with_timeout(
             json_stream(req.into_sql(), con),
