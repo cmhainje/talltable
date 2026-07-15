@@ -31,7 +31,7 @@ PARTS_RELOAD_SEC = float(os.environ.get("TALLTABLE_PARTS_RELOAD_SEC", 3600))
 FRAME_DATA = 0x00
 FRAME_STATUS = 0x01
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn")
 
 
 def _frame(data: bytes, frame_type: int = FRAME_DATA) -> bytes:
