@@ -134,10 +134,14 @@ def get_con():
         config={
             "threads": int(os.environ.get("DUCKDB_THREADS", 16)),
             "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "16GB"),
+            "autoload_known_extensions": False,
+            "autoinstall_known_extensions": False,
+            "allow_community_extensions": False,
         },
     )
     con.execute(f"SET allowed_directories=['{PIXEL_DB_PATH}']")
     con.execute("SET enable_external_access=false")
+    con.execute("SET lock_configuration=true")
     return con
 
 
