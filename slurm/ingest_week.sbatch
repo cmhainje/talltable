@@ -17,7 +17,6 @@ if [[ ! "$WEEK" =~ ^[0-9]{2}$ ]]; then
 fi
 
 module load uv
-export UV_ENV_FILE=/mnt/home/chainje/spxperiments/popeye_config.env
 cd /mnt/home/chainje/spxperiments/scripts
 
 if [ ! -f "/mnt/sdceph/users/spherex/talltable/waves.parquet" ]; then

@@ -1,6 +1,10 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()  # no-op if no .env is found; never overrides a var that's already set
+
 
 def require_env(var: str) -> Path:
     val = os.environ.get(var)

@@ -2789,6 +2789,7 @@ dependencies = [
     { name = "healpy" },
     { name = "numpy" },
     { name = "pyarrow" },
+    { name = "python-dotenv" },
     { name = "requests" },
 ]
 
@@ -2798,6 +2799,7 @@ requires-dist = [
     { name = "healpy", specifier = ">=1.18.1,<2.0.0" },
     { name = "numpy", specifier = ">=2.3.3,<3.0.0" },
     { name = "pyarrow", specifier = ">=21.0.0,<22.0.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.32.5" },
 ]
 
