@@ -44,6 +44,9 @@ IGNORED_WARNING_RE = re.compile(r"deprecationwarning", re.IGNORECASE)
 # for two checks at least this far apart
 STABILITY_MIN_GAP = timedelta(hours=20)
 
+# ...or once no FITS file has been modified in this long (see is_stable)
+NO_NEW_FILES_THRESHOLD = timedelta(days=7)
+
 MAX_WARNINGS_STORED = 20
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -106,6 +109,7 @@ def bootstrap_manifest(data_dir: Path) -> dict:
             "week": week,
             "folders": folders,
             "file_counts_by_check": [],
+            "latest_file_mtime": None,
             "status": "done",
             "detected_at": None,
             "submitted_at": None,
@@ -147,6 +151,7 @@ def detect_new_weeks(manifest: dict, data_dir: Path) -> None:
                 "week": week,
                 "folders": sorted(folders),
                 "file_counts_by_check": [],
+                "latest_file_mtime": None,
                 "status": "detected",
                 "detected_at": now_iso(),
                 "submitted_at": None,
@@ -174,11 +179,30 @@ def detect_new_weeks(manifest: dict, data_dir: Path) -> None:
 
         entry["folders"] = sorted(folders)
 
-        count = sum(1 for d in folders for _ in (data_dir / d).rglob("*.fits"))
+        count = 0
+        latest_mtime = 0.0
+        for d in folders:
+            for f in (data_dir / d).rglob("*.fits"):
+                count += 1
+                latest_mtime = max(latest_mtime, f.stat().st_mtime)
+
         entry["file_counts_by_check"].append({"ts": now_iso(), "count": count})
+        if latest_mtime:
+            entry["latest_file_mtime"] = datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat()
 
 
 def is_stable(entry: dict) -> bool:
+    """ready to ingest once either:
+        (a) the file count hasn't changed for at least STABILITY_MIN_GAP
+        (b) no file has been modified in over NO_NEW_FILES_THRESHOLD
+
+    note that files are downloaded from S3, so mtime is reliable estimate for download time"""
+    latest_mtime = entry.get("latest_file_mtime")
+    if latest_mtime is not None:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(latest_mtime)
+        if age >= NO_NEW_FILES_THRESHOLD:
+            return True
+
     samples = entry["file_counts_by_check"]
     if len(samples) < 2:
         return False
