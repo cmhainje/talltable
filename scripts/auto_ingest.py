@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = require_env("TALLTABLE_DATA_DIR") / "level2"
 SLURM_DIR = REPO_ROOT / "slurm"
 SBATCH_TEMPLATE = SLURM_DIR / "ingest_week.sbatch"
+SLURM_FILES_DIR = SLURM_DIR / "files"  # ingest_week.sbatch looks for {year}w{week}-files.txt here
 MANIFEST_PATH = SLURM_DIR / "manifest.json"
 LOG_PATH = SLURM_DIR / "auto_ingest.log"
 
@@ -179,16 +180,29 @@ def detect_new_weeks(manifest: dict, data_dir: Path) -> None:
 
         entry["folders"] = sorted(folders)
 
+        # matches ingest_week.sbatch's `find -mindepth 4 -maxdepth 4` relative to
+        # data_dir: two subdirectory levels under each week folder, then the file
         count = 0
         latest_mtime = 0.0
+        filepaths = []
         for d in folders:
-            for f in (data_dir / d).rglob("*.fits"):
+            for f in (data_dir / d).glob("*/*/*.fits"):
                 count += 1
                 latest_mtime = max(latest_mtime, f.stat().st_mtime)
+                filepaths.append(str(f))
 
         entry["file_counts_by_check"].append({"ts": now_iso(), "count": count})
         if latest_mtime:
             entry["latest_file_mtime"] = datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat()
+
+        # we're already paying the cost of walking every file for the count/mtime
+        # above, so write out ingest_week.sbatch's file list here for free -- it
+        # checks for this file and skips its own (much slower, serial) `find` if
+        # it's already present
+        if filepaths:
+            SLURM_FILES_DIR.mkdir(parents=True, exist_ok=True)
+            filelist_path = SLURM_FILES_DIR / f"{year}w{week:02d}-files.txt"
+            filelist_path.write_text("\n".join(sorted(filepaths)) + "\n")
 
 
 def is_stable(entry: dict) -> bool:
