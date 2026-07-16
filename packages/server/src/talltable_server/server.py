@@ -71,8 +71,26 @@ async def _reload_all_parts_periodically():
         logger.info(f"reloaded ALL_PARTS: {len(ALL_PARTS)} partitions")
 
 
+def _con_config():
+    return {
+        "threads": int(os.environ.get("DUCKDB_THREADS", 16)),
+        "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "16GB"),
+        "autoload_known_extensions": False,
+        "autoinstall_known_extensions": False,
+        "allow_community_extensions": False,
+    }
+
+
+# keep one dummy connection open to ensure that allowed_directories 
+# and enable_external_access stay locked to current values
+# (inherited by future connections)
+_lockdown_con: duckdb.DuckDBPyConnection | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _lockdown_con
+
     # startup
     TMP_DB_PATH.unlink(missing_ok=True)
     TMP_DB_PATH.with_suffix(".duckdb.wal").unlink(missing_ok=True)
@@ -80,6 +98,11 @@ async def lifespan(app: FastAPI):
     with duckdb.connect(TMP_DB_PATH) as con:
         con.execute(f"CREATE TABLE waves AS FROM read_parquet('{WAVES_DB_PATH}')")
         con.execute(f"CREATE TABLE images AS FROM read_parquet('{IMAGE_DB_PATH}')")
+
+    _lockdown_con = duckdb.connect(TMP_DB_PATH, read_only=True, config=_con_config())
+    _lockdown_con.execute(f"SET allowed_directories=['{PIXEL_DB_PATH}']")
+    _lockdown_con.execute("SET enable_external_access=false")
+    _lockdown_con.execute("SET lock_configuration=true")
 
     reload_task = asyncio.create_task(_reload_all_parts_periodically())
 
@@ -91,6 +114,8 @@ async def lifespan(app: FastAPI):
         await reload_task
     except asyncio.CancelledError:
         pass
+
+    _lockdown_con.close()
 
     TMP_DB_PATH.unlink(missing_ok=True)
     TMP_DB_PATH.with_suffix(".duckdb.wal").unlink(missing_ok=True)
@@ -128,21 +153,8 @@ async def value_error_handler(request: Request, exc: ValueError):
 
 
 def get_con():
-    con = duckdb.connect(
-        TMP_DB_PATH,
-        read_only=True,
-        config={
-            "threads": int(os.environ.get("DUCKDB_THREADS", 16)),
-            "memory_limit": os.environ.get("DUCKDB_MEMORY_LIMIT", "16GB"),
-            "autoload_known_extensions": False,
-            "autoinstall_known_extensions": False,
-            "allow_community_extensions": False,
-        },
-    )
-    con.execute(f"SET allowed_directories=['{PIXEL_DB_PATH}']")
-    con.execute("SET enable_external_access=false")
-    con.execute("SET lock_configuration=true")
-    return con
+    # inherits the lockdown already applied on _lockdown_con — see its comment
+    return duckdb.connect(TMP_DB_PATH, read_only=True, config=_con_config())
 
 
 # *** STATUS ***
