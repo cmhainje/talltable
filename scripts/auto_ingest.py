@@ -72,7 +72,7 @@ def save_manifest(path: Path, manifest: dict) -> None:
     tmp.replace(path)
 
 
-def bootstrap_manifest() -> dict:
+def bootstrap_manifest(data_dir: Path) -> dict:
     """seed manifest from images table"""
     import duckdb
     from talltable.paths import IMAGE_DB_PATH
@@ -96,10 +96,15 @@ def bootstrap_manifest() -> dict:
         weeks_seen[(year, week)] += 1
 
     for (year, week), count in sorted(weeks_seen.items()):
+        folders = sorted(
+            e.name for e in data_dir.iterdir()
+            if e.is_dir() and (m := WEEK_DIR_RE.match(e.name)) and (int(m.group(1)), int(m.group(2))) == (year, week)
+        ) if data_dir.exists() else []
+
         manifest[week_key(year, week)] = {
             "year": year,
             "week": week,
-            "folders": [],
+            "folders": folders,
             "file_counts_by_check": [],
             "status": "done",
             "detected_at": None,
@@ -356,7 +361,7 @@ def main():
         if args.manifest.exists():
             logger.error("%s already exists; refusing to overwrite. Remove it first if you really want to re-bootstrap.", args.manifest)
             return
-        manifest = bootstrap_manifest()
+        manifest = bootstrap_manifest(args.data_dir)
         save_manifest(args.manifest, manifest)
         logger.info("wrote %d entries to %s", len(manifest), args.manifest)
         return
