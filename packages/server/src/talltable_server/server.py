@@ -152,6 +152,22 @@ async def value_error_handler(request: Request, exc: ValueError):
     )
 
 
+class PartitionUnavailable(Exception):
+    """A known partition's file is missing because it's mid-ingest (compacting or split)."""
+    def __init__(self, part: int):
+        self.part = part
+        super().__init__(
+            f"partition {part} is temporarily unavailable (a database update is in "
+            "progress); please retry shortly"
+        )
+
+
+@app.exception_handler(PartitionUnavailable)
+async def partition_unavailable_handler(request: Request, exc: PartitionUnavailable):
+    request
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 def get_con():
     # inherits the lockdown already applied on _lockdown_con — see its comment
     return duckdb.connect(TMP_DB_PATH, read_only=True, config=_con_config())
@@ -190,19 +206,23 @@ async def restart(authorization: str | None = Header(default=None)):
 
 prefetch_sem = asyncio.Semaphore(2)
 
-def warm(path):
+def warm(part, path):
     try:
         with open(path, 'rb') as f:
             while f.read(4*1024*1024):
                 pass
     except OSError as e:
-        raise ValueError(f"could not read partition file {path}: {e}") from e
+        if part in ALL_PARTS:
+            raise PartitionUnavailable(part) from e
+        raise ValueError(f"partition file not found ({part})") from e
 
-async def prefetch_files(paths, max_workers=16):
+async def prefetch_files(parts_paths, max_workers=16):
     async with prefetch_sem:
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            await asyncio.gather(*[loop.run_in_executor(ex, warm, p) for p in paths])
+            await asyncio.gather(
+                *[loop.run_in_executor(ex, warm, p, path) for p, path in parts_paths]
+            )
 
 
 def parse_sql(sql):
@@ -318,8 +338,10 @@ def arrow_stream(
 @app.post("/sql")
 async def sql(req: SQLRequest):
     if req.partitions is not None:
-        paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
-        await prefetch_files(paths)
+        parts_paths = [
+            (p, PIXEL_DB_PATH / f'part={p}/compacted.parquet') for p in req.partitions
+        ]
+        await prefetch_files(parts_paths)
 
     con = get_con()
     return StreamingResponse(
@@ -362,8 +384,10 @@ def json_stream(
 @app.post("/sql.json")
 async def sql_json(req: SQLRequest):
     if req.partitions is not None:
-        paths = [PIXEL_DB_PATH / f'part={p}/compacted.parquet' for p in req.partitions]
-        await prefetch_files(paths)
+        parts_paths = [
+            (p, PIXEL_DB_PATH / f'part={p}/compacted.parquet') for p in req.partitions
+        ]
+        await prefetch_files(parts_paths)
 
     con = get_con()
     return StreamingResponse(
