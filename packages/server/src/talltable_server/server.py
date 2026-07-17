@@ -24,7 +24,7 @@ from talltable.partition import (
     find_partitions_disc,
     find_partitions_rect,
 )
-from talltable.paths import IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB_PATH
+from talltable.paths import DB_DIR, IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB_PATH
 
 
 TMP_DB_PATH = Path("temp.duckdb")
@@ -100,7 +100,7 @@ async def lifespan(app: FastAPI):
         con.execute(f"CREATE TABLE images AS FROM read_parquet('{IMAGE_DB_PATH}')")
 
     _lockdown_con = duckdb.connect(TMP_DB_PATH, read_only=True, config=_con_config())
-    _lockdown_con.execute(f"SET allowed_directories=['{PIXEL_DB_PATH}']")
+    _lockdown_con.execute(f"SET allowed_directories=['{DB_DIR}']")
     _lockdown_con.execute("SET enable_external_access=false")
     _lockdown_con.execute("SET lock_configuration=true")
 
