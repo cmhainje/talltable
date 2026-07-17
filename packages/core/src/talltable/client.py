@@ -41,15 +41,32 @@ def _unframe(raw: bytes) -> tuple[bytes, dict]:
     return arrow_buf
 
 
+def _raise_for_status(response):
+    """Like response.raise_for_status(), but surfaces the server's JSON 'detail' message."""
+    if response.ok:
+        return
+    detail = None
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        pass
+    if detail:
+        raise requests.HTTPError(
+            f"{response.status_code} Server Error: {response.reason} for url: {response.url}\n{detail}",
+            response=response,
+        )
+    response.raise_for_status()
+
+
 def fetch_arrow_stream(url, payload):
     with requests.post(url, json=payload, stream=True) as response:
-        response.raise_for_status()
+        _raise_for_status(response)
         raw = b"".join(response.iter_content(chunk_size=None))
         return ipc.open_stream(_unframe(raw)).read_all()
 
 def fetch_arrow_to_parquet(url, payload, output):
     with requests.post(url, json=payload, stream=True) as response:
-        response.raise_for_status()
+        _raise_for_status(response)
         arrow_buf = _unframe(response.content)
         reader = ipc.open_stream(arrow_buf)
 
