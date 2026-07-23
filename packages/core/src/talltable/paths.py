@@ -1,6 +1,14 @@
 import os
 from pathlib import Path
 
+from dotenv import find_dotenv, load_dotenv
+
+# look for .env in the parents of the cwd *and* the parents of this file
+# load both. loads *don't* overwrite, so precedence is
+#     user env > cwd walk > package walk
+load_dotenv(find_dotenv(usecwd=True))
+load_dotenv()
+
 
 def require_env(var: str) -> Path:
     val = os.environ.get(var)

@@ -2789,6 +2789,7 @@ dependencies = [
     { name = "healpy" },
     { name = "numpy" },
     { name = "pyarrow" },
+    { name = "python-dotenv" },
     { name = "requests" },
 ]
 
@@ -2798,6 +2799,7 @@ requires-dist = [
     { name = "healpy", specifier = ">=1.18.1,<2.0.0" },
     { name = "numpy", specifier = ">=2.3.3,<3.0.0" },
     { name = "pyarrow", specifier = ">=21.0.0,<25.0.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.32.5" },
 ]
 
@@ -2834,17 +2836,19 @@ version = "0.1.0"
 source = { editable = "packages/server" }
 dependencies = [
     { name = "duckdb" },
-    { name = "fastapi", extra = ["standard"] },
+    { name = "fastapi" },
     { name = "pyarrow" },
     { name = "sqlglot" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=1.4.1,<2.0.0" },
-    { name = "fastapi", extras = ["standard"], specifier = ">=0.136.1" },
+    { name = "fastapi", specifier = ">=0.136.1" },
     { name = "pyarrow", specifier = ">=21.0.0,<25.0.0" },
     { name = "sqlglot", specifier = ">=30.7.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
 
 [[package]]
@@ -2861,6 +2865,7 @@ dependencies = [
 dev = [
     { name = "astroquery" },
     { name = "boto3" },
+    { name = "fastapi", extra = ["standard"] },
     { name = "globus-sdk" },
     { name = "ipykernel" },
     { name = "ipywidgets" },
@@ -2884,6 +2889,7 @@ requires-dist = [
 dev = [
     { name = "astroquery", specifier = ">=0.4.10,<0.5.0" },
     { name = "boto3", specifier = ">=1.40.60,<2.0.0" },
+    { name = "fastapi", extras = ["standard"], specifier = ">=0.136.1" },
     { name = "globus-sdk", specifier = ">=4.5.0" },
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },

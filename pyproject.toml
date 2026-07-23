@@ -34,5 +34,6 @@ dev = [
     "boto3 (>=1.40.60,<2.0.0)",
     "globus-sdk>=4.5.0",
     "pandas>=3.0.3",
+    "fastapi[standard]>=0.136.1",
 ]
 

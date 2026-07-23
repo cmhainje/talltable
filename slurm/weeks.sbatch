@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J w44+45+46
+#SBATCH -J 26w13+14+15
 #SBATCH -C icelake
-#SBATCH --nodes 2
+#SBATCH --nodes 3
 #SBATCH --ntasks-per-node 48
 #SBATCH --cpus-per-task 1
 #SBATCH -o /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
@@ -10,7 +10,8 @@
 #SBATCH --mail-user ch4407@nyu.edu
 
 set -e
-WEEKS=(44 45 46)
+YEAR=2026
+WEEKS=(13 14 15)
 
 module load uv
 cd /mnt/home/chainje/spxperiments/scripts
@@ -22,8 +23,8 @@ fi
 for WEEK in "${WEEKS[@]}"; do
     FILE=/mnt/home/chainje/spxperiments/slurm/files/w${WEEK}-files.txt
     if [ ! -f "$FILE" ]; then
-        echo "finding all files from week ${WEEK}. this could take a while..."
-        find /mnt/sdceph/users/spherex/spherex_data_qr2/level2/ -maxdepth 4 -mindepth 4 -name "*2025W${WEEK}*.fits" > $FILE
+        echo "finding all files from ${YEAR} week ${WEEK}. this could take a while..."
+        find /mnt/sdceph/users/spherex/spherex_data_qr2/level2/ -maxdepth 4 -mindepth 4 -name "*${YEAR}W${WEEK}*.fits" > $FILE
     else
         echo "loading week ${WEEK} file list..."
     fi
