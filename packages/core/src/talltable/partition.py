@@ -62,7 +62,7 @@ def find_partitions_rect(ra, dec, width, height, all_parts=None):
     ipix = hp.query_polygon(
         2**PART_MAX_LEVEL,
         hp.ang2vec(
-            ra + 0.5 * width * np.array([-1, +1, -1, +1]),
+            ra + 0.5 * width * np.array([-1, +1, +1, -1]),
             dec + 0.5 * height * np.array([-1, -1, +1, +1]),
             lonlat=True,
         ),
