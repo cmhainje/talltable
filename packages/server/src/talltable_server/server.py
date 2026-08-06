@@ -9,11 +9,13 @@ import secrets
 import signal
 import struct
 
+from astropy.io import fits
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
+from pyarrow import parquet as pq
 from pydantic import BaseModel, model_validator
 from sqlglot import parse_one, exp
 from sqlglot.errors import ParseError
@@ -25,6 +27,8 @@ from talltable.partition import (
     find_partitions_rect,
 )
 from talltable.paths import DB_DIR, IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB_PATH
+
+from . import extract
 
 
 TMP_DB_PATH = Path("temp.duckdb")
@@ -433,3 +437,83 @@ def partitions_rect(ra: float, dec: float, width: float, height: float):
             map(int, find_partitions_rect(ra, dec, width, height, all_parts=ALL_PARTS))
         )
     }
+
+
+# *** PHOTOMETRY ***
+
+class FakeArgs:
+    cutout_size = 0.05
+    nchunks = 2
+    auto_deblend = None
+    deblend_radius = 20.0
+    deblend_maglim = None
+    fit_radius = 4.0
+    kappa = 4.0
+    max_iter = 10
+    linear_bkg = False
+    debug = False
+    show_figs = False
+    save_figs = False
+    results_dir = "spherex_results"
+    no_masking = False
+    quiet = True
+
+
+class PhotometryRequest(BaseModel):
+    ra: float
+    dec: float
+    pm_ra: float | None = None
+    pm_dec: float | None = None
+    ref_epoch: float = 57388.0
+
+
+@app.get("/photometry")
+def photometry(ra: float, dec: float, pm_ra: float | None = None, pm_dec: float | None = None, ref_epoch: float = 57388.0):
+    if extract.image_tab is None:
+        extract.image_tab = pq.read_table(IMAGE_DB_PATH)
+
+    if extract.psf_cubes is None:
+        psf_dir = Path("/mnt/sdceph/users/spherex/spherex_data_qr2/average_psf/cal-psf-v5-2026-082")
+        extract.psf_cubes = [
+            fits.open(p)
+            for det in range(1, 7)
+            for p in psf_dir.glob(f"{det}/*.fits")
+        ]
+
+    extract.sapm_images = None
+
+    results = extract.process_target("_", ra, dec, pm_ra, pm_dec, ref_epoch, FakeArgs())
+    return results
+
+
+class PhotometryBatchRequest(BaseModel):
+    batch: list[PhotometryRequest]
+
+
+@app.post("/photometry/batch")
+def batch_photometry(batch: PhotometryBatchRequest):
+    if extract.image_tab is None:
+        extract.image_tab = pq.read_table(IMAGE_DB_PATH)
+
+    if extract.psf_cubes is None:
+        psf_dir = Path("/mnt/sdceph/users/spherex/spherex_data_qr2/average_psf/cal-psf-v5-2026-082")
+        extract.psf_cubes = [
+            fits.open(p)
+            for det in range(1, 7)
+            for p in psf_dir.glob(f"{det}/*.fits")
+        ]
+
+    extract.sapm_images = None
+
+    all_results = []
+    for r in batch.batch:
+        results = extract.process_target(
+            "_", r.ra, r.dec,
+            r.pm_ra, r.pm_dec, r.ref_epoch,
+            FakeArgs(),
+        )
+        all_results.append(results)
+
+    return all_results
+
+
