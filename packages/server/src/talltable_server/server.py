@@ -501,27 +501,27 @@ def photometry(ra: float, dec: float, pm_ra: float | None = None, pm_dec: float 
     return results
 
 
-class PhotometryBatchRequest(BaseModel):
-    batch: list[PhotometryRequest]
-
-
-@app.post("/photometry/batch")
-def batch_photometry(batch: PhotometryBatchRequest):
-    all_results = []
-    con = get_con()
-    try:
-        for r in batch.batch:
-            results = extract.process_target(
-                "_", r.ra, r.dec,
-                r.pm_ra, r.pm_dec, r.ref_epoch,
-                FakeArgs(),
-                con=con,
-                warm_fn=_warm_parts,
-            )
-            all_results.append(results)
-    finally:
-        con.close()
-
-    return all_results
+# class PhotometryBatchRequest(BaseModel):
+#     batch: list[PhotometryRequest]
+# 
+# 
+# @app.post("/photometry/batch")
+# def batch_photometry(batch: PhotometryBatchRequest):
+#     all_results = []
+#     con = get_con()
+#     try:
+#         for r in batch.batch:
+#             results = extract.process_target(
+#                 "_", r.ra, r.dec,
+#                 r.pm_ra, r.pm_dec, r.ref_epoch,
+#                 FakeArgs(),
+#                 con=con,
+#                 warm_fn=_warm_parts,
+#             )
+#             all_results.append(results)
+#     finally:
+#         con.close()
+# 
+#     return all_results
 
 
