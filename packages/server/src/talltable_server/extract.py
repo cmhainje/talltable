@@ -1,7 +1,7 @@
 import argparse
 import csv
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -79,6 +79,16 @@ class ExtractionResult:
     ypix_fulldet: Optional[float]
     xpix_cutout: Optional[float]
     ypix_cutout: Optional[float]
+
+
+def _nan_fields_to_none(result: "ExtractionResult") -> "ExtractionResult":
+    """replace NaN with None so the result is json-serializable by fastapi"""
+    nan_fields = {
+        f.name: None
+        for f in fields(result)
+        if isinstance(v := getattr(result, f.name), float) and v != v
+    }
+    return replace(result, **nan_fields) if nan_fields else result
 
 
 # ---------------------------------------------------------------------------
@@ -1356,6 +1366,7 @@ def process_target(name, ra, dec, pm_ra, pm_dec, ref_epoch, args, con=None, warm
             no_masking=args.no_masking,
         )
         if result.wv_um is not None and result.wv_um is not np.nan:
+            result = _nan_fields_to_none(result)
             all_results.append(result)
             if not args.quiet:
                 print(
