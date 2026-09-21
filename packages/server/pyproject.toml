@@ -13,6 +13,8 @@ dependencies = [
     "fastapi>=0.136.1",
     "uvicorn[standard]>=0.34.0",
     "sqlglot>=30.7.0",
+    "astropy (>=7.1.0,<8.0.0)",
+    "scipy (>=1.16.2,<2.0.0)",
 ]
 
 [build-system]

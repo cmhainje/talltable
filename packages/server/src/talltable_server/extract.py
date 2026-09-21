@@ -14,6 +14,7 @@ import healpy
 import pyarrow
 import pyarrow.parquet
 from time import sleep
+from datetime import datetime
 
 from astropy.coordinates import SkyCoord
 import astropy.units as u
@@ -84,7 +85,7 @@ class ExtractionResult:
 # Helpers: Talltable processing
 # ---------------------------------------------------------------------------
 
-def download_cutout_pixels(ra,dec,cutout_size_deg=0.05,wvbounds=None):
+def download_cutout_pixels(ra,dec,cutout_size_deg=0.05,wvbounds=None,con=None,warm_fn=None):
     """
     Load the pixels corresponding to a small region around the target source.
     """
@@ -108,9 +109,25 @@ def download_cutout_pixels(ra,dec,cutout_size_deg=0.05,wvbounds=None):
                  .with_wavelengths()
                  .with_rowcoldet()
                 )
+
+    if con is None:
+        print("Executing talltable query...")
+        t0 = datetime.now()
+        pixels = query.execute()
+        print(f"Done. ({datetime.now() - t0})")
+        return pixels
+
+    from talltable.paths import WAVES_DB_PATH
+    parts = query.partitions()
+    if warm_fn is not None:
+        t0 = datetime.now()
+        warm_fn(parts)
+        print(f"  ..warmed {len(parts)} partition(s). ({datetime.now() - t0})")
+    sql = query._local_sql(parts).replace(f"read_parquet('{WAVES_DB_PATH}')", "waves")
     print("Executing talltable query...")
-    pixels = query.execute()
-    print("Done.")
+    t0 = datetime.now()
+    pixels = con.execute(sql).fetch_arrow_table()
+    print(f"Done. ({datetime.now() - t0})")
     return pixels
     
 def cutout_pixels_to_images(pixels, image_tab, ra, dec, cutout_size, nodup=True):
@@ -164,6 +181,7 @@ def cutout_pixels_to_images(pixels, image_tab, ra, dec, cutout_size, nodup=True)
     images = []
     n_imgs = len(unique_ids)
     print("Sorting pixels into images...")
+    t0 = datetime.now()
 
     for i in range(n_imgs):
         start = start_indices[i]
@@ -220,7 +238,7 @@ def cutout_pixels_to_images(pixels, image_tab, ra, dec, cutout_size, nodup=True)
             'mjd_avg': 0.5 * (t_beg + t_end),
         })
 
-    print("Done.")
+    print(f"Done. ({datetime.now() - t0})")
     return images
     
 # Helper: WCS determination from constructed images
@@ -1248,7 +1266,7 @@ def _spec_to_txt(results, out_path):
     print(f"  Spectrum written to {out_path}")
 
 
-def process_target(name, ra, dec, pm_ra, pm_dec, ref_epoch, args):
+def process_target(name, ra, dec, pm_ra, pm_dec, ref_epoch, args, con=None, warm_fn=None):
     all_results: List[ExtractionResult] = []
 
     if image_tab is None or psf_cubes is None:
@@ -1260,35 +1278,39 @@ def process_target(name, ra, dec, pm_ra, pm_dec, ref_epoch, args):
     # ------------------------------------------------------------------
     # Step 1: download cutout pixels
     # ------------------------------------------------------------------
-    
+
     try:
-        cutout_pixels = download_cutout_pixels(ra=ra,dec=dec,cutout_size_deg=args.cutout_size)
+        cutout_pixels = download_cutout_pixels(ra=ra,dec=dec,cutout_size_deg=args.cutout_size,con=con,warm_fn=warm_fn)
         nodup = True
     except Exception:
+        if con is not None:
+            # if we're using local connections, don't do the smaller chunk retries
+            raise
+
         print(f"   PixelQuery failed. Trying again in {6*args.nchunks} wavelength chunks...")
         sleep(3)
         try:
             nwv1234 = 4*args.nchunks
             wvmin1234 = 0.733
             wvmax1234 = 3.811
-            
+
             nwv56 = 2*args.nchunks
             wvmin56 = 3.809
             wvmax56 = 5.015
-            
+
             cutout_pixels_wv = [None for ii in range(nwv1234+nwv56)]
-            
+
             wvbins = 10**np.linspace(np.log10(wvmin1234),np.log10(wvmax1234),nwv1234+1)
             for ii in range(nwv1234):
                 print(f"   Query {ii+1}/{nwv1234+nwv56}")
                 cutout_pixels_wv[ii] = download_cutout_pixels(ra=ra,dec=dec,cutout_size_deg=args.cutout_size,
-                                                              wvbounds=[wvbins[ii],wvbins[ii+1]])
-             
+                                                              wvbounds=[wvbins[ii],wvbins[ii+1]],con=con,warm_fn=warm_fn)
+
             wvbins = 10**np.linspace(np.log10(wvmin56),np.log10(wvmax56),nwv56+1)
             for ii in range(nwv56):
                 print(f"   Query {nwv1234+ii+1}/{nwv1234+nwv56}")
                 cutout_pixels_wv[nwv1234+ii] = download_cutout_pixels(ra=ra,dec=dec,cutout_size_deg=args.cutout_size,
-                                                              wvbounds=[wvbins[ii],wvbins[ii+1]])
+                                                              wvbounds=[wvbins[ii],wvbins[ii+1]],con=con,warm_fn=warm_fn)
                                                               
             cutout_pixels = pyarrow.concat_tables(cutout_pixels_wv)
             nodup = False
@@ -1309,6 +1331,7 @@ def process_target(name, ra, dec, pm_ra, pm_dec, ref_epoch, args):
     # Step 2: optimal extraction from each cutout
     # ------------------------------------------------------------------
     print("Extracting spectrophotometry...")
+    t0 = datetime.now()
     for image in cutout_images:
         det = image['detector_id']
         result = optimal_extract(
@@ -1344,7 +1367,7 @@ def process_target(name, ra, dec, pm_ra, pm_dec, ref_epoch, args):
                         f"  n_outlier={result.n_pix_outlier}"
                         f"  converged={result.converged}"
                      )
-    print("Done.")
+    print(f"Done. ({datetime.now() - t0})")
     return all_results
 
 def write_results(name, all_results, args):
