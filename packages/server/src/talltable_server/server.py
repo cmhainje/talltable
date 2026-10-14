@@ -9,11 +9,13 @@ import secrets
 import signal
 import struct
 
+from astropy.io import fits
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pathlib import Path
+from pyarrow import parquet as pq
 from pydantic import BaseModel, model_validator
 from sqlglot import parse_one, exp
 from sqlglot.errors import ParseError
@@ -26,9 +28,12 @@ from talltable.partition import (
 )
 from talltable.paths import DB_DIR, IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB_PATH
 
+from . import extract
+
 
 TMP_DB_PATH = Path("temp.duckdb")
 TIMEOUT_SEC = 90.0
+PSF_CALIB_DIR = Path(__file__).resolve().parents[2] / "calib" / "psf"
 PARTS_RELOAD_SEC = float(os.environ.get("TALLTABLE_PARTS_RELOAD_SEC", 3600))
 RESTART_TOKEN = os.environ.get("TALLTABLE_RESTART_TOKEN")
 MAX_BODY_SIZE = 500 * 1024 * 1024  # 500 MB
@@ -99,6 +104,13 @@ async def lifespan(app: FastAPI):
         con.execute(f"CREATE TABLE waves AS FROM read_parquet('{WAVES_DB_PATH}')")
         con.execute(f"CREATE TABLE images AS FROM read_parquet('{IMAGE_DB_PATH}')")
 
+    extract.image_tab = pq.read_table(IMAGE_DB_PATH)
+    extract.psf_cubes = [
+        fits.open(PSF_CALIB_DIR / f"average_psf_D{det}_spx_cal-psf-v5-2026-082.fits")
+        for det in range(1, 7)
+    ]
+    extract.sapm_images = None
+
     _lockdown_con = duckdb.connect(TMP_DB_PATH, read_only=True, config=_con_config())
     _lockdown_con.execute(f"SET allowed_directories=['{DB_DIR}']")
     _lockdown_con.execute("SET enable_external_access=false")
@@ -149,6 +161,16 @@ async def value_error_handler(request: Request, exc: ValueError):
     request
     return JSONResponse(
         status_code=422, content={"detail": f"Request could not be processed. Error message:\n{exc}"}
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    # fallback for anything not caught by a more specific handler above/below
+    # otherwise, the default handler would return a bare "Internal Server Error"
+    request
+    return JSONResponse(
+        status_code=500, content={"detail": str(exc)}
     )
 
 
@@ -433,3 +455,73 @@ def partitions_rect(ra: float, dec: float, width: float, height: float):
             map(int, find_partitions_rect(ra, dec, width, height, all_parts=ALL_PARTS))
         )
     }
+
+
+# *** PHOTOMETRY ***
+
+
+def _warm_parts(parts):
+    for p in parts:
+        warm(p, PIXEL_DB_PATH / f"part={p}/compacted.parquet")
+
+
+class FakeArgs:
+    cutout_size = 0.05
+    nchunks = 2
+    auto_deblend = None
+    deblend_radius = 20.0
+    deblend_maglim = None
+    fit_radius = 4.0
+    kappa = 4.0
+    max_iter = 10
+    linear_bkg = False
+    debug = False
+    show_figs = False
+    save_figs = False
+    results_dir = "spherex_results"
+    no_masking = False
+    quiet = True
+
+
+class PhotometryRequest(BaseModel):
+    ra: float
+    dec: float
+    pm_ra: float | None = None
+    pm_dec: float | None = None
+    ref_epoch: float = 57388.0
+
+
+@app.get("/photometry")
+def photometry(ra: float, dec: float, pm_ra: float | None = None, pm_dec: float | None = None, ref_epoch: float = 57388.0):
+    con = get_con()
+    try:
+        results = extract.process_target("_", ra, dec, pm_ra, pm_dec, ref_epoch, FakeArgs(), con=con, warm_fn=_warm_parts)
+    finally:
+        con.close()
+    return results
+
+
+# class PhotometryBatchRequest(BaseModel):
+#     batch: list[PhotometryRequest]
+# 
+# 
+# @app.post("/photometry/batch")
+# def batch_photometry(batch: PhotometryBatchRequest):
+#     all_results = []
+#     con = get_con()
+#     try:
+#         for r in batch.batch:
+#             results = extract.process_target(
+#                 "_", r.ra, r.dec,
+#                 r.pm_ra, r.pm_dec, r.ref_epoch,
+#                 FakeArgs(),
+#                 con=con,
+#                 warm_fn=_warm_parts,
+#             )
+#             all_results.append(results)
+#     finally:
+#         con.close()
+# 
+#     return all_results
+
+
