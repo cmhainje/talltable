@@ -41,15 +41,16 @@ def massage_data():
     these should be shaped so that they can be indexed into given waveids later
     (note: I do not mean that they need to be seriously large arrays who can directly take a waveid as an index. just that, given a waveid, there should be a simple mapping to an index in this array. perhaps the index of the waveid if all distinct waveids were sorted and flattened? something.)
 
-    when reading c: check for bad values (negative, zero, infinite, nan).
-    if bad values correspond to nonfunctional pixels, replace by 1.0.
-
-    note that nonfunc and spectral calibration products are in detector coordinates,
+    note that nonfunc calibration product is in detector coordinates,
     so D4-6 are flipped along X relative to the sky.
-
 
     return c, delta, zodi_scale, nonfunc
     """
+
+    # read data products
+    # assert c is all finite and positive
+    # interpolate/extrapolate zodi_scale to every wavelength
+
     raise NotImplementedError
 
 
@@ -90,9 +91,12 @@ def migrate_partition(part_number, c, delta, zodi_scale, nonfunc):
     # write...
     #   flux     = old_flux     * c[indexes] + delta[indexes]
     #   variance = old_variance * c[indexes] * c[indexes]
-    #   flags    = old_flags    | (NONFUNC_FLAG if waveid in nonfunc)
+    #   flags    = old_flags    | (NONFUNC_FLAG where nonfunc[indexes])
     #   zodi     = old_zodi     * zodi_scale[indexes]
     #   other cols = old_other_columns
+
+    # write metadata to the footer:
+    #   (fill in the metadata here)
 
     # replace migrating.parquet -> compacted.parquet
 
