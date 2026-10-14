@@ -1,19 +1,27 @@
+import functools
 import logging
 import numpy as np
 import os
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+import subprocess
 
+from datetime import datetime, timezone
+from pathlib import Path
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from talltable.constants import HP_HIGH_LEVEL, MAX_ROWS_PER_PART, PART_MAX_LEVEL
+from talltable.constants import (
+    HP_HIGH_LEVEL,
+    MAX_ROWS_PER_PART,
+    PART_MAX_LEVEL,
+    ROW_GROUP_SIZE,
+)
 from talltable.partition import part_to_level_index, level_index_to_part
 from talltable.paths import PIXEL_DB_PATH, SCRATCH_DIR
 from talltable_pipeline.util import defer_interrupt
 from talltable_pipeline.batch import CHUNK_COLUMNS
-
 
 task_id = int(os.environ.get("SLURM_PROCID", 0))
 num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
@@ -27,6 +35,39 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+
+
+@functools.cache
+def compaction_provenance():
+    """footer metadata recorded by every compaction: when it ran, and with which code.
+
+    these are deliberately different keys from the migration's (`migration`, `release`,
+    `migrated_at`, `talltable_git`, `calibration`), which must survive compaction untouched.
+    """
+    here = Path(__file__).resolve().parent
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(here), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = "unknown"  # never fail a compaction over provenance
+    return {
+        "last_compacted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "last_compacted_git": commit,
+    }
+
+
+def footer_metadata(schema):
+    """the user-defined footer metadata of a parquet file, given its schema, as a str -> str dict
+    (without the ARROW:schema entry that pyarrow manages itself)"""
+    return {
+        k.decode(): v.decode()
+        for k, v in (schema.metadata or {}).items()
+        if k != b"ARROW:schema"
+    }
 
 
 def scan_chunk_files():
@@ -52,7 +93,9 @@ def scan_chunk_files():
             partition_index[pid].append((fpath, int(start), int(end)))
 
     if task_id == 0:
-        logger.info(f"scanned {len(bin_files)} chunk files, found {len(partition_index)} partitions")
+        logger.info(
+            f"scanned {len(bin_files)} chunk files, found {len(partition_index)} partitions"
+        )
     return partition_index
 
 
@@ -101,10 +144,15 @@ def compact_partition(part, sources):
     if sources:
         tables.extend(read_partition_data(sources))
 
-    # include existing compacted parquet if present
+    # include existing compacted parquet if present, and keep its footer metadata
+    # (e.g. the QR2 -> QR3 migration marker): concat_tables below takes the schema
+    # metadata of the *first* table, which is a chunk table that has none.
+    footer = {}
     if pq_path.exists():
         try:
-            tables.append(pq.ParquetFile(pq_path).read())
+            existing = pq.ParquetFile(pq_path)
+            footer = footer_metadata(existing.schema_arrow)
+            tables.append(existing.read())
         except pa.lib.ArrowInvalid as e:
             msg = f"failed to open Parquet file {pq_path} with error message:\n{e}"
             raise RuntimeError(msg)
@@ -119,6 +167,7 @@ def compact_partition(part, sources):
     # sort
     sort_keys = [("hphigh", "ascending")]
     table = table.sort_by(sort_keys)
+    table = table.replace_schema_metadata({**footer, **compaction_provenance()})
     sorting_cols = pq.SortingColumn.from_ordering(table.schema, sort_keys)
 
     # t_sort = _time.monotonic() - t0 - t_read
@@ -135,7 +184,7 @@ def compact_partition(part, sources):
                 _part_dir = PIXEL_DB_PATH / f"part={_p}"
                 _part_dir.mkdir(exist_ok=True, parents=True)
 
-                _lo = (_index)     << 2 * (HP_HIGH_LEVEL - _level)
+                _lo = (_index) << 2 * (HP_HIGH_LEVEL - _level)
                 _hi = (_index + 1) << 2 * (HP_HIGH_LEVEL - _level)
 
                 _mask = (pc.field("hphigh") >= _lo) & (pc.field("hphigh") < _hi)
@@ -149,6 +198,7 @@ def compact_partition(part, sources):
                     compression_level=3,
                     use_dictionary=False,
                     sorting_columns=sorting_cols,
+                    row_group_size=ROW_GROUP_SIZE,
                 )
 
             # delete parent's compacted.parquet now that all children are written;
@@ -166,6 +216,7 @@ def compact_partition(part, sources):
                 compression_level=3,
                 use_dictionary=False,
                 sorting_columns=sorting_cols,
+                row_group_size=ROW_GROUP_SIZE,
             )
             # free the old copy immediately to keep peak storage low; the new
             # staging file is the resume marker for re-runs.
@@ -180,6 +231,9 @@ def compact_partition(part, sources):
 
 
 def main():
+    # compute the footer provenance once, here, so the forked children below reuse it
+    compaction_provenance()
+
     # scan binary chunk files for partition boundaries
     partition_index = scan_chunk_files()
 
@@ -210,9 +264,7 @@ def main():
         _, status = os.waitpid(child_pid, 0)
         if os.WIFSIGNALED(status):
             sig = os.WTERMSIG(status)
-            raise RuntimeError(
-                f"compact of partition {part} killed by signal {sig}"
-            )
+            raise RuntimeError(f"compact of partition {part} killed by signal {sig}")
         exit_code = os.WEXITSTATUS(status)
         if exit_code != 0:
             raise RuntimeError(f"compact of partition {part} failed (exit {exit_code})")
