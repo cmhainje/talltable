@@ -41,33 +41,66 @@ UPGRADE_TABLE_PATH = DB_DIR / "qr2_to_qr3.parquet"
 
 N_PIX = 2040  # each detector is N_PIX x N_PIX
 DETECTORS = (1, 2, 3, 4, 5, 6)
-NONFUNC_BORDER = 4  # the nonfunc maps are 2048x2048, including the reference-pixel border
-FLIP_X_DETECTORS = (4, 5, 6)  # nonfunc maps are in detector coordinates; these are mirrored in X
+NONFUNC_BORDER = (
+    4  # the nonfunc maps are 2048x2048, including the reference-pixel border
+)
+FLIP_X_DETECTORS = (
+    4,
+    5,
+    6,
+)  # nonfunc maps are in detector coordinates; these are mirrored in X
 
 NONFUNC_FLAG = 1 << 6  # FLAGS bit 6
 ROW_GROUP_SIZE = 256 * 1024  # rows per row group in migrated partitions (they were ~1M)
 
 
 def parse():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--local", action="store_true")
-    ap.add_argument(
+    ap = argparse.ArgumentParser(
+        description="migrate the pixel database from the QR2 to the QR3 (R7) calibration. "
+        "run `prepare` once, then `migrate` (under srun, it strides over partitions "
+        "using SLURM_PROCID / SLURM_NTASKS)."
+    )
+    verbs = ap.add_subparsers(
+        dest="command", required=True, metavar="{prepare,migrate}"
+    )
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--local", action="store_true", help="use the local data directories"
+    )
+
+    prepare_parser = verbs.add_parser(
+        "prepare",
+        parents=[common],
+        help="download the calibration products and write the upgrade table",
+    )
+    prepare_parser.add_argument(
         "--download",
         action="store_true",
         help="download missing calibration products from S3. (always on with --local; "
         "otherwise a missing product is an error)",
     )
-    ap.add_argument(
+    prepare_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="check the calibration products, but do not write the upgrade table",
+    )
+
+    migrate_parser = verbs.add_parser(
+        "migrate",
+        parents=[common],
+        help="migrate partitions (needs the upgrade table written by `prepare`)",
+    )
+    migrate_parser.add_argument(
         "--parts",
         type=int,
         nargs="+",
         help="migrate only these partitions (default: every partition in parts.txt)",
     )
-    ap.add_argument(
+    migrate_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="read-only: download and check the calibration data, report which "
-        "partitions would be migrated, but write nothing",
+        help="read-only: report which partitions would be migrated, but write nothing",
     )
     return ap.parse_args()
 
@@ -89,7 +122,9 @@ def download_if_missing(template, paths, download=True):
         "s3", config=Config(signature_version=UNSIGNED), region_name=S3_REGION
     )
 
-    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=S3_BUCKET, Prefix=prefix)
+    pages = s3.get_paginator("list_objects_v2").paginate(
+        Bucket=S3_BUCKET, Prefix=prefix
+    )
     objects = [o for page in pages for o in page.get("Contents", []) if o["Size"] > 0]
 
     # an empty (or mistyped) prefix would make the check below pass vacuously
@@ -153,8 +188,15 @@ def waveid_to_index(waveid):
     row, col, det = waveid_to_rowcoldet(np.asarray(waveid))
     # the waveid has 12 bits each for row and col, so a bad waveid could otherwise
     # silently index into a different pixel
-    if (row >= N_PIX).any() or (col >= N_PIX).any() or (det < 1).any() or (det > len(DETECTORS)).any():
-        raise ValueError("waveid out of range (row/col >= N_PIX or detector not in 1-6)")
+    if (
+        (row >= N_PIX).any()
+        or (col >= N_PIX).any()
+        or (det < 1).any()
+        or (det > len(DETECTORS)).any()
+    ):
+        raise ValueError(
+            "waveid out of range (row/col >= N_PIX or detector not in 1-6)"
+        )
     return (det.astype(np.int64) - 1) * N_PIX**2 + row * N_PIX + col
 
 
@@ -205,7 +247,9 @@ def massage_data(paths):
         lam, scale = np.asarray(table["wavelength_um"]), np.asarray(table["ZodiScale"])
         if np.any(np.diff(lam) <= 0):
             raise ValueError(f"D{det}: zodi scaling wavelengths are not increasing")
-        zodi_scale[i] = np.interp(wave, lam, scale)  # np.interp clamps outside the table
+        zodi_scale[i] = np.interp(
+            wave, lam, scale
+        )  # np.interp clamps outside the table
 
         nonfunc[i] = read_nonfunc(paths, det)
 
@@ -225,7 +269,9 @@ def provenance():
     here = Path(__file__).resolve().parent
     commit = subprocess.run(
         ["git", "-C", str(here), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     products = {
         name: Path(template).name
@@ -258,7 +304,9 @@ def check_script_committed():
     script = Path(__file__).resolve()
     status = subprocess.run(
         ["git", "-C", str(script.parent), "status", "--porcelain", "--", str(script)],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     if status:
         raise RuntimeError(
@@ -289,7 +337,9 @@ def write_upgrade_table(c, delta, zodi_scale):
     if not np.array_equal(waveid_to_index(waveid), np.arange(len(waveid))):
         raise RuntimeError("waveid order does not match the order of the data arrays")
 
-    table = pa.table({"waveid": waveid, "c": c, "delta": delta, "zodi_scale": zodi_scale})
+    table = pa.table(
+        {"waveid": waveid, "c": c, "delta": delta, "zodi_scale": zodi_scale}
+    )
     table = table.replace_schema_metadata(provenance())
     sorting = pq.SortingColumn.from_ordering(table.schema, [("waveid", "ascending")])
 
@@ -415,31 +465,52 @@ def migrate_partition(part_number, c, delta, zodi_scale, nonfunc, dry_run=False)
     return "migrated"
 
 
-def main():
-    args = parse()
-    paths = {
-        "qr2": QR2_DIR_LOCAL if args.local else QR2_DIR_POPEYE,
-        "qr3": QR3_DIR_LOCAL if args.local else QR3_DIR_POPEYE,
-    }
+def read_all_nonfunc(paths):
+    """the nonfunc maps of all detectors as one flat boolean array (see massage_data)"""
+    return np.stack([read_nonfunc(paths, det) for det in DETECTORS]).ravel()
 
-    # provenance: written to the parquet footer of the upgrade table and of every
-    # partition this run migrates, so that they record what was done to them, when,
-    # and with which code (commit hash) and calibration products.
-    # (a dry run records nothing, so there an uncommitted script is only a warning)
-    try:
-        check_script_committed()
-    except RuntimeError as e:
-        if not args.dry_run:
-            raise
-        print(f"warning (ignored in a dry run): {e}")
-    if args.dry_run:
-        print("DRY RUN: nothing will be written")
-    print("provenance (written to the footer of every file this migration produces):")
-    for key, value in provenance().items():
-        print(f"  {key}: {value}")
 
-    # download files
-    # (on popeye, a missing product is an error unless --download is given)
+def read_upgrade_table():
+    """reads c, delta, and zodi_scale back from the upgrade table.
+
+    `migrate` uses these, instead of recomputing them from the calibration products,
+    so the values applied to the data are by construction the ones stored for the
+    downgrade. returns flat float32 arrays in the order of massage_data.
+    """
+    table = pq.read_table(UPGRADE_TABLE_PATH, use_threads=False)
+    if table.num_rows != len(DETECTORS) * N_PIX**2:
+        raise ValueError(f"{UPGRADE_TABLE_PATH} has {table.num_rows} rows")
+    waveid = table["waveid"].to_numpy()
+    if not np.array_equal(waveid_to_index(waveid), np.arange(table.num_rows)):
+        raise ValueError(f"{UPGRADE_TABLE_PATH} is not in waveid_to_index order")
+    return tuple(table[name].to_numpy() for name in ("c", "delta", "zodi_scale"))
+
+
+def check_upgrade_table():
+    """fails unless the upgrade table exists and was written by `prepare` from this
+    commit with these calibration products."""
+    if not UPGRADE_TABLE_PATH.exists():
+        raise FileNotFoundError(
+            f"{UPGRADE_TABLE_PATH} does not exist. run `prepare` first"
+        )
+    footer = pq.read_metadata(UPGRADE_TABLE_PATH).metadata or {}
+    expected = provenance()
+    for key in ("migration", "release", "talltable_git", "calibration"):
+        found = footer.get(key.encode(), b"").decode()
+        if found != expected[key]:
+            raise RuntimeError(
+                f"{UPGRADE_TABLE_PATH} was not written by this version of the migration: "
+                f"its {key!r} is {found!r}, expected {expected[key]!r}. run `prepare` again "
+                "(from the same commit as `migrate`)"
+            )
+
+
+def prepare(args, paths):
+    """downloads the calibration products and writes the upgrade table.
+
+    run this once, before `migrate`. it never touches the partitions.
+    """
+    # on popeye, a missing product is an error unless --download is given
     download = args.local or args.download
     download_if_missing(FLUX_CORR, paths, download)
     download_if_missing(GAIN_MATRIX, paths, download)
@@ -449,28 +520,107 @@ def main():
     download_if_missing(ZODI_SCALING, paths, download)
     download_if_missing(SPECTRAL_WCS, paths, download)
 
-    # prepare upgrade data
-    c, delta, zodi_scale, nonfunc = massage_data(paths)
-    if not args.dry_run:
-        write_upgrade_table(c, delta, zodi_scale)
+    c, delta, zodi_scale, _ = massage_data(paths)
 
-    # load partitions
+    if UPGRADE_TABLE_PATH.exists():
+        # partitions may already have been migrated with the table that is there, so
+        # never silently replace it with different values: that would break the downgrade
+        old = read_upgrade_table()
+        if not all(np.array_equal(a, b) for a, b in zip(old, (c, delta, zodi_scale))):
+            raise RuntimeError(
+                f"{UPGRADE_TABLE_PATH} exists and its values differ from the ones just "
+                "computed. refusing to overwrite it (if no partition has been migrated "
+                "with it, delete it and run `prepare` again)"
+            )
+        # same values: harmless to rewrite (the downgrade is unaffected), which is
+        # only needed if it was written by a different commit than `migrate` will check
+        try:
+            check_upgrade_table()
+            print(f"{UPGRADE_TABLE_PATH} is already up to date; not rewriting it")
+            return
+        except RuntimeError:
+            print(
+                "the upgrade table has the same values but a different provenance; rewriting it"
+            )
+
+    if args.dry_run:
+        print(
+            "dry run: calibration products are all present and readable; not writing the table"
+        )
+        return
+    write_upgrade_table(c, delta, zodi_scale)
+    print(f"wrote {UPGRADE_TABLE_PATH}")
+
+
+def migrate(args, paths):
+    """migrates partitions. under srun, this task takes every SLURM_NTASKS-th partition
+    (starting from SLURM_PROCID), the same way compact.py does."""
+    task_id = int(os.environ.get("SLURM_PROCID", 0))
+    num_tasks = int(os.environ.get("SLURM_NTASKS", 1))
+
+    # a dry run only reads partition footers, so it needs none of the arrays
+    c = delta = zodi_scale = nonfunc = None
+    if args.dry_run:
+        try:
+            check_upgrade_table()
+        except (FileNotFoundError, RuntimeError) as e:
+            if task_id == 0:
+                print(f"warning (ignored in a dry run): {e}")
+    else:
+        check_upgrade_table()
+        c, delta, zodi_scale = read_upgrade_table()
+        nonfunc = read_all_nonfunc(paths)
+
     if args.parts:
         partitions = args.parts
     else:
         with open(PART_DB_PATH, "r") as f:
             partitions = [int(x) for x in f.readlines()]
+    partitions = partitions[task_id::num_tasks]
 
-    # do the migrations
     outcomes = Counter()
-    for part_num in tqdm(partitions, desc="partitions", unit="part"):
+    for part_num in tqdm(
+        partitions, desc="partitions", unit="part", disable=task_id != 0
+    ):
         outcome = migrate_partition(
             part_num, c, delta, zodi_scale, nonfunc, args.dry_run
         )
         outcomes[outcome] += 1
 
     summary = ", ".join(f"{n} {outcome}" for outcome, n in outcomes.items())
-    print(f"{summary} (of {len(partitions)} partitions)")
+    print(
+        f"[task {task_id}] {summary or 'nothing to do'} (of {len(partitions)} partitions)"
+    )
+
+
+def main():
+    args = parse()
+    paths = {
+        "qr2": QR2_DIR_LOCAL if args.local else QR2_DIR_POPEYE,
+        "qr3": QR3_DIR_LOCAL if args.local else QR3_DIR_POPEYE,
+    }
+    first_task = int(os.environ.get("SLURM_PROCID", 0)) == 0
+
+    try:
+        check_script_committed()
+    except RuntimeError as e:
+        if not args.dry_run:
+            raise
+        if first_task:
+            print(f"warning (ignored in a dry run): {e}")
+    if first_task:
+        if args.dry_run:
+            print("DRY RUN: nothing will be written")
+        print(
+            "provenance (written to the footer of every file this migration produces):"
+        )
+        for key, value in provenance().items():
+            print(f"  {key}: {value}")
+
+    if args.command == "prepare":
+        prepare(args, paths)
+    else:
+        migrate(args, paths)
 
 
 if __name__ == "__main__":
