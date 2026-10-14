@@ -317,6 +317,8 @@ First, make sure you have your environment variables set. You will need
 
 - `TALLTABLE_DB_DIR`: tells the system where to build the database
 - `TALLTABLE_DATA_DIR`: path to the spectral images
+- `TALLTABLE_DATA_DIR_QR3`: path to the QR3 (R7 pipeline) data and calibration files.
+    Only needed to build `waves.parquet`, which takes the R7 spectral WCS from here.
 - `TALLTABLE_SCRATCH_DIR` (optional): put interim files in a different location.
     This is good if you have very fast scratch space available.
     Defaults to `TALLTABLE_DB_DIR`.
