@@ -3,25 +3,31 @@ import functools
 import json
 import os
 import subprocess
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+import boto3
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from astropy.io import fits
 from astropy.table import Table
+from botocore import UNSIGNED
+from botocore.config import Config
+from tqdm import tqdm
 
 from talltable import rowcoldet_to_waveid, waveid_to_rowcoldet
 from talltable.constants import ALL_COL, ALL_ROW
-from talltable.paths import DB_DIR, PART_DB_PATH
+from talltable.paths import DB_DIR, PART_DB_PATH, PIXEL_DB_PATH
 
 QR2_DIR_POPEYE = "/mnt/sdceph/users/spherex/spherex_data_qr2"
 QR3_DIR_POPEYE = "/mnt/sdceph/users/spherex/spherex_data_qr3"
 QR2_DIR_LOCAL = "/Users/connor/research/talltable/data/qr2"
 QR3_DIR_LOCAL = "/Users/connor/research/talltable/data/qr3"
 
-S3_BUCKET = "s3://nasa-irsa-spherex"
+S3_BUCKET = "nasa-irsa-spherex"
+S3_REGION = "us-west-2"
 
 FLUX_CORR = "{qr3}/l3_flux_corrections/cal-flxc-v1-2026-191/"
 GAIN_MATRIX = "{qr3}/abs_gain_matrix/cal-agm-v8-2026-191/"
@@ -38,15 +44,37 @@ DETECTORS = (1, 2, 3, 4, 5, 6)
 NONFUNC_BORDER = 4  # the nonfunc maps are 2048x2048, including the reference-pixel border
 FLIP_X_DETECTORS = (4, 5, 6)  # nonfunc maps are in detector coordinates; these are mirrored in X
 
+NONFUNC_FLAG = 1 << 6  # FLAGS bit 6
+ROW_GROUP_SIZE = 256 * 1024  # rows per row group in migrated partitions (they were ~1M)
+
 
 def parse():
     ap = argparse.ArgumentParser()
     ap.add_argument("--local", action="store_true")
+    ap.add_argument(
+        "--download",
+        action="store_true",
+        help="download missing calibration products from S3. (always on with --local; "
+        "otherwise a missing product is an error)",
+    )
+    ap.add_argument(
+        "--parts",
+        type=int,
+        nargs="+",
+        help="migrate only these partitions (default: every partition in parts.txt)",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="read-only: download and check the calibration data, report which "
+        "partitions would be migrated, but write nothing",
+    )
     return ap.parse_args()
 
 
-def download_if_missing(template, paths):
+def download_if_missing(template, paths, download=True):
     """checks if the data product is present. if not, downloads from S3.
+    (if `download` is False, raises FileNotFoundError instead of downloading.)
 
     `template` is one of the product constants above (e.g. FLUX_CORR); `paths` maps
     "qr2"/"qr3" to the local base dirs. the local layout mirrors the bucket, so the
@@ -55,31 +83,38 @@ def download_if_missing(template, paths):
     "present" means every file under the S3 prefix exists locally with the same size
     (so an interrupted download is detected and resumed, not mistaken for complete).
     """
-    path = template.format(**paths)
-    s3_uri = f"{S3_BUCKET}/{template.format(qr2='qr2', qr3='qr3')}"
-    aws = ["aws", "s3"]
-    anon = ["--no-sign-request"]
-
-    # an empty (or mistyped) prefix would make the sync check below pass vacuously.
-    # (`aws s3 ls` exits nonzero when there are no matches, so don't use check=True)
-    listing = subprocess.run(
-        aws + ["ls", s3_uri, "--recursive"] + anon, capture_output=True, text=True
+    path = Path(template.format(**paths))
+    prefix = template.format(qr2="qr2", qr3="qr3")
+    s3 = boto3.client(
+        "s3", config=Config(signature_version=UNSIGNED), region_name=S3_REGION
     )
-    if not listing.stdout.strip():
-        raise FileNotFoundError(
-            f"nothing found at {s3_uri} (aws exit code {listing.returncode}: "
-            f"{listing.stderr.strip() or 'no error output'})"
-        )
 
-    sync = aws + ["sync", s3_uri, path, "--size-only", "--no-progress"] + anon
-    todo = subprocess.run(
-        sync + ["--dryrun"], check=True, capture_output=True, text=True
-    ).stdout
-    if not todo.strip():
+    pages = s3.get_paginator("list_objects_v2").paginate(Bucket=S3_BUCKET, Prefix=prefix)
+    objects = [o for page in pages for o in page.get("Contents", []) if o["Size"] > 0]
+
+    # an empty (or mistyped) prefix would make the check below pass vacuously
+    if not objects:
+        raise FileNotFoundError(f"nothing found at s3://{S3_BUCKET}/{prefix}")
+
+    todo = []
+    for obj in objects:
+        local = path / obj["Key"].removeprefix(prefix)
+        if not local.is_file() or local.stat().st_size != obj["Size"]:
+            todo.append((obj["Key"], local))
+    if not todo:
         return
 
-    print(f"downloading {len(todo.splitlines())} file(s): {s3_uri} -> {path}")
-    subprocess.run(sync, check=True)
+    if not download:
+        raise FileNotFoundError(
+            f"calibration product {path} is incomplete: {len(todo)} of {len(objects)} "
+            f"file(s) are missing or have the wrong size (e.g. {todo[0][1]}). "
+            "pass --download to fetch them from S3."
+        )
+
+    print(f"downloading {len(todo)} file(s): s3://{S3_BUCKET}/{prefix} -> {path}")
+    for key, local in todo:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        s3.download_file(S3_BUCKET, key, str(local))  # writes a temp file, then renames
 
 
 def product_file(template, paths, det):
@@ -116,6 +151,10 @@ def waveid_to_index(waveid):
     waves.parquet), so this is just (det - 1) * N_PIX**2 + row * N_PIX + col.
     """
     row, col, det = waveid_to_rowcoldet(np.asarray(waveid))
+    # the waveid has 12 bits each for row and col, so a bad waveid could otherwise
+    # silently index into a different pixel
+    if (row >= N_PIX).any() or (col >= N_PIX).any() or (det < 1).any() or (det > len(DETECTORS)).any():
+        raise ValueError("waveid out of range (row/col >= N_PIX or detector not in 1-6)")
     return (det.astype(np.int64) - 1) * N_PIX**2 + row * N_PIX + col
 
 
@@ -269,42 +308,111 @@ def write_upgrade_table(c, delta, zodi_scale):
     os.replace(tmp_path, UPGRADE_TABLE_PATH)
 
 
-def write_marker(part_number):
-    """makes a file to the partition directory marking the partition as migrated from qr2 to qr3"""
-    raise NotImplementedError
+def has_been_migrated(path) -> bool:
+    """checks the footer of the parquet file at `path` for the migration marker.
+
+    the marker is the provenance() metadata, which migrate_partition writes into the
+    new file *before* renaming it into place, so the data and its marker commit
+    together (there is no window in which a partition is migrated but unmarked).
+    """
+    footer = pq.read_metadata(path).metadata or {}
+    return footer.get(b"migration") == b"qr2_to_qr3"
 
 
-def has_been_migrated(part_number) -> bool:
-    """checks for the existence of the 'migrated' marker"""
-    raise NotImplementedError
+def migrate_batch(batch, c, delta, zodi_scale, nonfunc):
+    """applies the upgrade to one record batch of a partition and returns the new batch.
+
+    arithmetic is done in float64 and cast back to the column's float32.
+    """
+    for name in ("waveid", "flux", "variance", "flags", "zodi"):
+        if batch[name].null_count:
+            raise ValueError(f"column {name!r} has nulls")
+    column = lambda name: batch[name].to_numpy(zero_copy_only=False)
+
+    idx = waveid_to_index(column("waveid"))
+    c_ = c[idx].astype(np.float64)
+    new = {
+        "flux": column("flux").astype(np.float64) * c_ + delta[idx],
+        "variance": column("variance").astype(np.float64) * c_ * c_,
+        "flags": column("flags") | (nonfunc[idx].astype(np.int32) * NONFUNC_FLAG),
+        "zodi": column("zodi").astype(np.float64) * zodi_scale[idx],
+    }
+    arrays = [
+        pa.array(new[f.name], type=f.type) if f.name in new else batch[f.name]
+        for f in batch.schema
+    ]
+    return pa.RecordBatch.from_arrays(arrays, schema=batch.schema)
 
 
-def migrate_partition(part_number, c, delta, zodi_scale, nonfunc):
-    """migrates partition `part_number`."""
-    if has_been_migrated(part_number):
-        return
+def migrate_partition(part_number, c, delta, zodi_scale, nonfunc, dry_run=False):
+    """migrates partition `part_number`.
 
-    # read waveids and determine index arrays to index
-    # into c, delta, etc for next parts
+    returns "migrated" (or, with dry_run, "would be migrated"), "already migrated" if
+    the partition's footer says so, or "missing" if it has no compacted.parquet.
 
-    # open new parquet file: `/path/to/part=xxx/migrating.parquet`
+    the new file is streamed to `migrating.parquet` (same schema and writer options as
+    compact.py, row groups of ROW_GROUP_SIZE, same row order so it stays sorted by
+    hphigh), with provenance() in the footer. it is verified and fsynced, then renamed
+    over compacted.parquet. if verification fails, migrating.parquet is left in place
+    and nothing else is touched.
+    """
+    path = PIXEL_DB_PATH / f"part={part_number}" / "compacted.parquet"
+    if not path.exists():
+        tqdm.write(f"warning: part={part_number} has no compacted.parquet; skipping")
+        return "missing"
+    if has_been_migrated(path):
+        return "already migrated"
+    if dry_run:
+        return "would be migrated"
 
-    # copy the data over, updating the columns that need updates
-    # - be sure that the output remains sorted by hphigh (as the input was)
-    # - also please use a row group size of 256k (currently ~1M)
-    # write...
-    #   flux     = old_flux     * c[indexes] + delta[indexes]
-    #   variance = old_variance * c[indexes] * c[indexes]
-    #   flags    = old_flags    | (NONFUNC_FLAG where nonfunc[indexes])
-    #   zodi     = old_zodi     * zodi_scale[indexes]
-    #   other cols = old_other_columns
+    tmp_path = path.with_name("migrating.parquet")
+    src = pq.ParquetFile(path)
+    schema = src.schema_arrow
 
-    # write metadata to the footer:
-    #   (fill in the metadata here)
+    # footer: keep whatever is there (apart from the schema pyarrow adds itself), add provenance
+    footer = {
+        k.decode(): v.decode()
+        for k, v in (schema.metadata or {}).items()
+        if k != b"ARROW:schema"
+    }
+    footer.update(provenance())
+    sorting = pq.SortingColumn.from_ordering(schema, [("hphigh", "ascending")])
 
-    # replace migrating.parquet -> compacted.parquet
+    n_rows, last_hphigh = 0, None
+    with open(tmp_path, "wb") as f:
+        with pq.ParquetWriter(
+            f,
+            schema.with_metadata(footer),
+            compression="zstd",
+            compression_level=3,
+            use_dictionary=False,
+            sorting_columns=sorting,
+        ) as writer:
+            for batch in src.iter_batches(batch_size=ROW_GROUP_SIZE, use_threads=False):
+                # rows are copied in order, so hphigh stays sorted iff it was
+                hphigh = batch["hphigh"].to_numpy()
+                if (np.diff(hphigh) < 0).any() or (
+                    last_hphigh is not None and hphigh[0] < last_hphigh
+                ):
+                    raise ValueError(f"part={part_number}: hphigh is not sorted")
+                last_hphigh = hphigh[-1]
 
-    write_marker(part_number)
+                new_batch = migrate_batch(batch, c, delta, zodi_scale, nonfunc)
+                writer.write_batch(new_batch, row_group_size=ROW_GROUP_SIZE)
+                n_rows += len(batch)
+        f.flush()
+        os.fsync(f.fileno())
+
+    # verify before replacing anything
+    if n_rows != src.metadata.num_rows or pq.read_metadata(tmp_path).num_rows != n_rows:
+        raise ValueError(f"part={part_number}: row count changed during migration")
+    if not pq.read_schema(tmp_path).equals(schema, check_metadata=False):
+        raise ValueError(f"part={part_number}: schema changed during migration")
+    if not has_been_migrated(tmp_path):
+        raise ValueError(f"part={part_number}: migration marker missing from new file")
+
+    os.replace(tmp_path, path)
+    return "migrated"
 
 
 def main():
@@ -317,31 +425,52 @@ def main():
     # provenance: written to the parquet footer of the upgrade table and of every
     # partition this run migrates, so that they record what was done to them, when,
     # and with which code (commit hash) and calibration products.
-    check_script_committed()
+    # (a dry run records nothing, so there an uncommitted script is only a warning)
+    try:
+        check_script_committed()
+    except RuntimeError as e:
+        if not args.dry_run:
+            raise
+        print(f"warning (ignored in a dry run): {e}")
+    if args.dry_run:
+        print("DRY RUN: nothing will be written")
     print("provenance (written to the footer of every file this migration produces):")
     for key, value in provenance().items():
         print(f"  {key}: {value}")
 
     # download files
-    download_if_missing(FLUX_CORR, paths)
-    download_if_missing(GAIN_MATRIX, paths)
-    download_if_missing(DARK_R6, paths)
-    download_if_missing(DARK_R7, paths)
-    download_if_missing(NONFUNC_MAP, paths)
-    download_if_missing(ZODI_SCALING, paths)
-    download_if_missing(SPECTRAL_WCS, paths)
+    # (on popeye, a missing product is an error unless --download is given)
+    download = args.local or args.download
+    download_if_missing(FLUX_CORR, paths, download)
+    download_if_missing(GAIN_MATRIX, paths, download)
+    download_if_missing(DARK_R6, paths, download)
+    download_if_missing(DARK_R7, paths, download)
+    download_if_missing(NONFUNC_MAP, paths, download)
+    download_if_missing(ZODI_SCALING, paths, download)
+    download_if_missing(SPECTRAL_WCS, paths, download)
 
     # prepare upgrade data
     c, delta, zodi_scale, nonfunc = massage_data(paths)
-    write_upgrade_table(c, delta, zodi_scale)
+    if not args.dry_run:
+        write_upgrade_table(c, delta, zodi_scale)
 
     # load partitions
-    with open(PART_DB_PATH, "r") as f:
-        partitions = [int(x) for x in f.readlines()]
+    if args.parts:
+        partitions = args.parts
+    else:
+        with open(PART_DB_PATH, "r") as f:
+            partitions = [int(x) for x in f.readlines()]
 
     # do the migrations
-    for part_num in partitions:
-        migrate_partition(part_num, c, delta, zodi_scale, nonfunc)
+    outcomes = Counter()
+    for part_num in tqdm(partitions, desc="partitions", unit="part"):
+        outcome = migrate_partition(
+            part_num, c, delta, zodi_scale, nonfunc, args.dry_run
+        )
+        outcomes[outcome] += 1
+
+    summary = ", ".join(f"{n} {outcome}" for outcome, n in outcomes.items())
+    print(f"{summary} (of {len(partitions)} partitions)")
 
 
 if __name__ == "__main__":
