@@ -31,7 +31,7 @@ DISCONNECTED = "client disconnected"     # client went away before the response 
 class Stats:
     def __init__(self):
         self.started = time.time()
-        self.records = deque(maxlen=MAX_RECORDS)  # (end time, endpoint, result, duration)
+        self.records = deque(maxlen=MAX_RECORDS)  # (end time, endpoint, result, duration, slot wait)
         self.totals = Counter()                   # (endpoint, result) -> count since start
         self.in_flight = Counter()
         self.failures = deque(maxlen=RECENT_FAILURES)
@@ -44,7 +44,7 @@ class Stats:
         key = f"{method} {path}"
         return key if key in self.endpoints else "other"
 
-    def finish(self, endpoint, status, result, duration):
+    def finish(self, endpoint, status, result, duration, wait=None):
         if result is None:
             if status is None or status >= 500:
                 result = SERVER_ERROR
@@ -53,7 +53,7 @@ class Stats:
             else:
                 result = "ok"
         now = time.time()
-        self.records.append((now, endpoint, result, duration))
+        self.records.append((now, endpoint, result, duration, wait))
         self.totals[(endpoint, result)] += 1
         if result != "ok":
             self.failures.append((now, endpoint, status, result))
@@ -63,8 +63,10 @@ class Stats:
         while self.records and self.records[0][0] < now - WINDOWS[-1][1]:
             self.records.popleft()
 
-        per = defaultdict(lambda: {"requests": {w: 0 for w, _ in WINDOWS}, "results_1h": Counter(), "durations_1h": []})
-        for t, endpoint, result, duration in self.records:
+        per = defaultdict(lambda: {
+            "requests": {w: 0 for w, _ in WINDOWS}, "results_1h": Counter(), "durations_1h": [], "waits_1h": [], "runs_1h": [],
+        })
+        for t, endpoint, result, duration, wait in self.records:
             e = per[endpoint]
             for name, sec in WINDOWS:
                 if t >= now - sec:
@@ -72,18 +74,24 @@ class Stats:
             if t >= now - DURATION_WINDOW_SEC:
                 e["results_1h"][result] += 1
                 e["durations_1h"].append(duration)
+                if wait is not None:  # a pixel query: time waiting for a slot, and the rest
+                    e["waits_1h"].append(wait)
+                    e["runs_1h"].append(duration - wait)
 
         endpoints = {}
         for endpoint in sorted(set(per) | {e for e, _ in self.totals} | set(self.in_flight)):
             e = per[endpoint]
-            d = sorted(e["durations_1h"])
+            d, w, r = sorted(e["durations_1h"]), sorted(e["waits_1h"]), sorted(e["runs_1h"])
             endpoints[endpoint] = {
                 "in_flight": self.in_flight[endpoint],
                 "requests": e["requests"],
                 "results_1h": dict(e["results_1h"]),
                 "duration_1h_sec": {
-                    "p50": _pct(d, 0.5), "p90": _pct(d, 0.9), "max": d[-1] if d else None,
+                    "p50": _pct(d, 0.5), "p90": _pct(d, 0.9), "max": round(d[-1], 3) if d else None,
                 },
+                # pixel queries only: the part of the duration spent waiting for a slot, and the rest
+                "slot_wait_1h_sec": {"p50": _pct(w, 0.5), "p90": _pct(w, 0.9)},
+                "running_1h_sec": {"p50": _pct(r, 0.5), "p90": _pct(r, 0.9)},
                 "since_start": {r: n for (ep, r), n in self.totals.items() if ep == endpoint},
             }
         return {
@@ -115,7 +123,7 @@ class StatsMiddleware:
     the app through `scope["state"]["stats"]["result"]` (see the categories above): a streamed
     query that fails, times out or is abandoned has already sent a 200."""
 
-    def __init__(self, app, stats: Stats, exclude=("/status",)):
+    def __init__(self, app, stats: Stats, exclude=("/status", "/favicon.ico")):  # (browsers viewing /status ask for the latter)
         self.app = app
         self.stats = stats
         self.exclude = set(exclude)
@@ -125,7 +133,7 @@ class StatsMiddleware:
             return await self.app(scope, receive, send)
 
         endpoint = self.stats.endpoint(scope["app"], scope["method"], scope["path"])
-        rec = {"status": None, "result": None}
+        rec = {"status": None, "result": None, "wait": None}
         scope.setdefault("state", {})["stats"] = rec
 
         async def send_status(message):
@@ -145,7 +153,7 @@ class StatsMiddleware:
             raise
         finally:
             self.stats.in_flight[endpoint] -= 1
-            self.stats.finish(endpoint, rec["status"], rec["result"], time.monotonic() - t0)
+            self.stats.finish(endpoint, rec["status"], rec["result"], time.monotonic() - t0, rec["wait"])
 
 
 def set_result(scope, result):
@@ -153,6 +161,13 @@ def set_result(scope, result):
     rec = scope.get("state", {}).get("stats")
     if rec is not None and rec["result"] is None:
         rec["result"] = result
+
+
+def set_wait(scope, seconds):
+    """record how long the current request waited for a pixel query slot (no-op outside StatsMiddleware)"""
+    rec = scope.get("state", {}).get("stats")
+    if rec is not None:
+        rec["wait"] = seconds
 
 
 def render_html(snap):
@@ -166,7 +181,7 @@ def render_html(snap):
 
     rows = []
     for endpoint, e in snap["endpoints"].items():
-        d = e["duration_1h_sec"]
+        d, w, r = e["duration_1h_sec"], e["slot_wait_1h_sec"], e["running_1h_sec"]
         rows.append(
             "<tr>"
             + f"<td>{esc(endpoint)}</td><td>{e['in_flight']}</td>"
@@ -174,6 +189,7 @@ def render_html(snap):
             + f"<td>{e['results_1h'].get('ok', 0)}</td>"
             + "".join(f"<td>{e['results_1h'].get(r, 0)}</td>" for r in results)
             + f"<td>{fmt(d['p50'])}</td><td>{fmt(d['p90'])}</td><td>{fmt(d['max'])}</td>"
+            + f"<td>{fmt(w['p50'])}</td><td>{fmt(w['p90'])}</td><td>{fmt(r['p50'])}</td><td>{fmt(r['p90'])}</td>"
             + "</tr>"
         )
     failures = "".join(
@@ -183,10 +199,11 @@ def render_html(snap):
     head = (
         "<tr><th rowspan=2>endpoint</th><th rowspan=2>in flight</th>"
         f"<th colspan={len(windows)}>requests</th><th colspan={1 + len(results)}>results, last hour</th>"
-        "<th colspan=3>duration, last hour (s)</th></tr><tr>"
+        "<th colspan=3>duration, last hour (s)</th><th colspan=2>of which waiting for a slot</th>"
+        "<th colspan=2>running</th></tr><tr>"
         + "".join(f"<th>{w}</th>" for w in windows)
         + "<th>ok</th>" + "".join(f"<th>{esc(r)}</th>" for r in results)
-        + "<th>p50</th><th>p90</th><th>max</th></tr>"
+        + "<th>p50</th><th>p90</th><th>max</th><th>p50</th><th>p90</th><th>p50</th><th>p90</th></tr>"
     )
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta http-equiv="refresh" content="15">

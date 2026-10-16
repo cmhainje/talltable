@@ -9,6 +9,7 @@ import re
 import secrets
 import signal
 import struct
+import time
 
 from astropy.io import fits
 from concurrent.futures import ThreadPoolExecutor
@@ -258,7 +259,7 @@ async def restart(authorization: str | None = Header(default=None)):
 # checking its partitions to the end of its result stream; the rest wait their turn, but no longer
 # than SLOT_WAIT_SEC (a waiting request sends nothing, and the load balancer in front drops idle
 # connections after 60 s), then get a 503 to retry.
-MAX_PIXEL_QUERIES = int(os.environ.get("TALLTABLE_MAX_PIXEL_QUERIES", 2))
+MAX_PIXEL_QUERIES = int(os.environ.get("TALLTABLE_MAX_PIXEL_QUERIES", 4))
 query_slots = asyncio.Semaphore(MAX_PIXEL_QUERIES)
 SLOT_WAIT_SEC = 45.0
 
@@ -284,11 +285,16 @@ class QuerySlot:
         self.release()
 
 
-async def acquire_query_slot() -> QuerySlot:
+async def acquire_query_slot(scope=None) -> QuerySlot:
+    """(`scope`: the request's, to record the wait for /status)"""
+    t0 = time.monotonic()
     try:
         await asyncio.wait_for(query_slots.acquire(), timeout=SLOT_WAIT_SEC)
     except asyncio.TimeoutError:
         raise ServerBusy()
+    finally:
+        if scope is not None:
+            st.set_wait(scope, time.monotonic() - t0)
     return QuerySlot()
 
 
@@ -453,10 +459,10 @@ def arrow_stream(
         con.close()
 
 
-async def start_query(req: SQLRequest):
+async def start_query(req: SQLRequest, scope=None):
     """Take a pixel query slot (if it's a pixel query) and get the query ready to stream: returns
     (the query, a connection, the function that gives the slot back, or None)."""
-    slot = await acquire_query_slot() if req.partitions is not None else None
+    slot = await acquire_query_slot(scope) if req.partitions is not None else None
     try:
         if req.partitions is not None:
             parts_paths = [
@@ -474,7 +480,7 @@ async def start_query(req: SQLRequest):
 
 @app.post("/sql")
 async def sql(req: SQLRequest, request: Request):
-    query, con, release = await start_query(req)
+    query, con, release = await start_query(req, request.scope)
     on_result = partial(st.set_result, request.scope)
     return StreamingResponse(
         stream_with_timeout(
@@ -519,7 +525,7 @@ def json_stream(
 
 @app.post("/sql.json")
 async def sql_json(req: SQLRequest, request: Request):
-    query, con, release = await start_query(req)
+    query, con, release = await start_query(req, request.scope)
     on_result = partial(st.set_result, request.scope)
     return StreamingResponse(
         stream_with_timeout(
