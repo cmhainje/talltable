@@ -5,6 +5,14 @@ detects if new, uningested SPHEREx data exists in the data dir
 submits an ingestion job if so
 also maintains a manifest of submitted jobs, statuses, etc in slurm/manifest.json
 
+each run looks at the data directory of one release (--release, default qr3): TALLTABLE_DATA_DIR_QR3 for qr3,
+TALLTABLE_DATA_DIR for qr2. the job it submits gets that directory as its TALLTABLE_DATA_DIR, so everything the
+job runs (ingest, compact, build_wcs, ...) works on that release without further changes.
+
+a week that has already been ingested is re-checked on every run: if more files have shown up since (for
+example an `l2b_retry-*` directory that arrived after the main directory), the week is reopened and
+ingested again. ingest.py skips images it has already ingested, so only the new ones are added.
+
 usage:
     uv run python scripts/auto_ingest.py              # normal run
     uv run python scripts/auto_ingest.py --dry-run    # don't submit or write manifest
@@ -27,7 +35,9 @@ from talltable.paths import require_env
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-DATA_DIR = require_env("TALLTABLE_DATA_DIR") / "level2"
+# the environment variable that holds the data directory of each release
+RELEASE_DATA_DIR_VARS = {"qr2": "TALLTABLE_DATA_DIR", "qr3": "TALLTABLE_DATA_DIR_QR3"}
+DEFAULT_RELEASE = "qr3"
 SLURM_DIR = REPO_ROOT / "slurm"
 SBATCH_TEMPLATE = SLURM_DIR / "ingest_week.sbatch"
 SLURM_FILES_DIR = SLURM_DIR / "files"  # ingest_week.sbatch looks for {year}w{week}-files.txt here
@@ -62,6 +72,22 @@ def week_key(year: int, week: int) -> str:
     return f"{year}W{week:02d}"
 
 
+def entry_release(entry: dict) -> str:
+    """the release of a manifest entry. entries from before releases were tracked are all QR2."""
+    return entry.get("release", "qr2")
+
+
+def release_level2_dir(release: str) -> Path:
+    """the `level2` directory of a release's data directory"""
+    return require_env(RELEASE_DATA_DIR_VARS[release]) / "level2"
+
+
+def count_fits(data_dir: Path, folders: list[str]) -> int:
+    """number of FITS files in the given week folders: the same files as ingest_week.sbatch's `find`
+    (two directory levels under each week folder), counted without stat'ing each one"""
+    return sum(1 for d in folders for _ in (data_dir / d).glob("*/*/*.fits"))
+
+
 def load_manifest(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -76,7 +102,7 @@ def save_manifest(path: Path, manifest: dict) -> None:
     tmp.replace(path)
 
 
-def bootstrap_manifest(data_dir: Path) -> dict:
+def bootstrap_manifest(data_dir: Path, release: str) -> dict:
     """seed manifest from images table"""
     import duckdb
     from talltable.paths import IMAGE_DB_PATH
@@ -91,6 +117,7 @@ def bootstrap_manifest(data_dir: Path) -> dict:
     ).fetchnumpy()["filepath"]
 
     weeks_seen = {}
+    week_release = {}
     for fp in filepaths:
         m = re.search(r"(\d{4})W(\d{2})_", str(fp))
         if not m:
@@ -98,6 +125,9 @@ def bootstrap_manifest(data_dir: Path) -> dict:
         year, week = int(m.group(1)), int(m.group(2))
         weeks_seen.setdefault((year, week), 0)
         weeks_seen[(year, week)] += 1
+        # the release is in the filepath (.../spherex_data_qr3/level2/...); `release` is the fallback
+        r = re.search(r"qr\d+", str(fp))
+        week_release.setdefault((year, week), r.group(0) if r else release)
 
     for (year, week), count in sorted(weeks_seen.items()):
         folders = sorted(
@@ -108,8 +138,10 @@ def bootstrap_manifest(data_dir: Path) -> dict:
         manifest[week_key(year, week)] = {
             "year": year,
             "week": week,
+            "release": week_release[(year, week)],
             "folders": folders,
             "file_counts_by_check": [],
+            "file_count_at_submit": count,  # the baseline that new files are detected against
             "latest_file_mtime": None,
             "status": "done",
             "detected_at": None,
@@ -126,8 +158,59 @@ def bootstrap_manifest(data_dir: Path) -> dict:
     return manifest
 
 
-def detect_new_weeks(manifest: dict, data_dir: Path) -> None:
-    """glob level2, record file-count samples for unsubmitted weeks"""
+def reopen_if_new_files(key: str, entry: dict, data_dir: Path, folders: list[str]) -> None:
+    """a week that has been ingested: if there are more files than were ingested (for example an
+    `l2b_retry-*` directory that arrived after the main one), reopen it ("detected") so that it is
+    ingested again. ingest.py skips images that are already in the database, so only the new ones are added.
+
+    the baseline is `file_count_at_submit`: the number of files in the list the ingest job was given."""
+    baseline = entry.get("file_count_at_submit")
+    if baseline is None:
+        return  # nothing to compare against (weeks seeded by --bootstrap record one)
+
+    count = count_fits(data_dir, folders)
+    if count < baseline:
+        logger.warning("%s: %d files now, but %d were ingested; files were removed?", key, count, baseline)
+        return
+    if count == baseline:
+        if sorted(folders) != entry["folders"]:
+            logger.info("%s: folder set changed (was %s, now %s) but no new files", key, entry["folders"], sorted(folders))
+            entry["folders"] = sorted(folders)
+        return
+
+    logger.info(
+        "%s: %d new file(s) since the previous ingest (%d -> %d; folders %s -> %s); reopening",
+        key, count - baseline, baseline, count, entry["folders"], sorted(folders),
+    )
+    entry.setdefault("previous_runs", []).append({
+        "job_id": entry["job_id"],
+        "job_name": entry["job_name"],
+        "log_path": entry["log_path"],
+        "submitted_at": entry["submitted_at"],
+        "completed_at": entry["completed_at"],
+        "status": entry["status"],
+        "file_count": baseline,
+        "warnings": entry["warnings"],
+    })
+    entry.update(
+        status="detected",
+        folders=sorted(folders),
+        file_counts_by_check=[],
+        latest_file_mtime=None,
+        job_id=None,
+        job_name=None,
+        log_path=None,
+        submitted_at=None,
+        completed_at=None,
+        warnings=[],
+        notes=f"reopened: {count - baseline} new file(s) after the previous ingest",
+        reopened_at=now_iso(),
+    )
+
+
+def detect_new_weeks(manifest: dict, data_dir: Path, release: str) -> None:
+    """glob level2, record file-count samples for unsubmitted weeks.
+    weeks that were already ingested are checked for files that arrived later (see reopen_if_new_files)."""
     if not data_dir.exists():
         logger.error("data dir %s does not exist", data_dir)
         return
@@ -146,12 +229,22 @@ def detect_new_weeks(manifest: dict, data_dir: Path) -> None:
         key = week_key(year, week)
         entry = manifest.get(key)
 
+        if entry is not None and entry_release(entry) != release:
+            logger.warning(
+                "%s is in the manifest as a %s week, but is also in the %s data directory: skipping it "
+                "(a reprocessed release needs its own handling)",
+                key, entry_release(entry), release,
+            )
+            continue
+
         if entry is None:
             entry = {
                 "year": year,
                 "week": week,
+                "release": release,
                 "folders": sorted(folders),
                 "file_counts_by_check": [],
+                "file_count_at_submit": None,
                 "latest_file_mtime": None,
                 "status": "detected",
                 "detected_at": now_iso(),
@@ -166,15 +259,20 @@ def detect_new_weeks(manifest: dict, data_dir: Path) -> None:
             manifest[key] = entry
             logger.info("detected new week %s (folders: %s)", key, sorted(folders))
 
+        if entry["status"] in ("done", "done_with_warnings"):
+            reopen_if_new_files(key, entry, data_dir, folders)
+
         if entry["status"] != "detected":
             if sorted(folders) != entry["folders"]:
-                logger.error(
-                    "%s: folder set changed after submission! was %s, now %s",
-                    key, entry["folders"], sorted(folders),
+                # (an ingest that is in flight, or a failed one: whatever arrived is picked up as new
+                # files once the week has completed)
+                logger.warning(
+                    "%s: folder set changed since the last check! was %s, now %s (status %s)",
+                    key, entry["folders"], sorted(folders), entry["status"],
                 )
             continue
 
-        if len(folders) == 1:
+        if len(folders) == 1 and not entry["notes"].startswith("reopened"):
             entry["notes"] = f"only 1 folder found: {sorted(folders)}"
             logger.warning("%s: %s", key, entry["notes"])
 
@@ -228,15 +326,18 @@ def is_stable(entry: dict) -> bool:
     return (ts_b - ts_a) >= STABILITY_MIN_GAP
 
 
-def _submit(entry: dict, dry_run: bool) -> None:
-    """sbatch the ingest job for a single manifest entry and update it in place."""
+def _submit(entry: dict, dry_run: bool, data_dir: Path) -> None:
+    """sbatch the ingest job for a single manifest entry and update it in place.
+
+    `data_dir` is the release's `level2` directory. the job gets its parent as TALLTABLE_DATA_DIR (which
+    takes precedence over .env), so ingest, compact, build_wcs, ... all work on that release."""
     year, week = entry["year"], entry["week"]
     week_str = f"{week:02d}"
     job_name = f"ingest{year}W{week_str}"
     cmd = [
         "sbatch",
         "--job-name", job_name,
-        "--export", f"ALL,YEAR={year},WEEK={week_str}",
+        "--export", f"ALL,YEAR={year},WEEK={week_str},TALLTABLE_DATA_DIR={data_dir.parent}",
         str(SBATCH_TEMPLATE),
     ]
 
@@ -252,6 +353,10 @@ def _submit(entry: dict, dry_run: bool) -> None:
 
     job_id = m.group(1)
     entry["status"] = "submitted"
+    # the file list the job uses is the one written by the latest detection pass: this many files.
+    # (a later pass that finds more files than this reopens the week, see reopen_if_new_files)
+    samples = entry["file_counts_by_check"]
+    entry["file_count_at_submit"] = samples[-1]["count"] if samples else None
     entry["submitted_at"] = now_iso()
     entry["job_id"] = job_id
     entry["job_name"] = job_name
@@ -259,8 +364,8 @@ def _submit(entry: dict, dry_run: bool) -> None:
     logger.info("submitted %s as job %s", week_key(year, week), job_id)
 
 
-def submit_ready_week(manifest: dict, dry_run: bool) -> None:
-    """submit a week's ingest job.
+def submit_ready_week(manifest: dict, dry_run: bool, data_dir: Path, release: str) -> None:
+    """submit a week's ingest job (of the given release).
 
     note: NEVER run more than one at a time: post_compact.py will NOT handle that gracefully"""
     failed = [e for e in manifest.values() if e["status"] == "failed"]
@@ -281,17 +386,21 @@ def submit_ready_week(manifest: dict, dry_run: bool) -> None:
         return
 
     candidates = sorted(
-        (e for e in manifest.values() if e["status"] == "detected" and is_stable(e)),
+        (
+            e for e in manifest.values()
+            if e["status"] == "detected" and entry_release(e) == release and is_stable(e)
+        ),
         key=lambda e: (e["year"], e["week"]),
     )
     if not candidates:
         return
 
-    _submit(candidates[0], dry_run)
+    _submit(candidates[0], dry_run, data_dir)
 
 
-def retry_failed_week(manifest: dict, dry_run: bool) -> None:
-    """re-submit the failed week"""
+def retry_failed_week(manifest: dict, dry_run: bool, data_dir: Path | None) -> None:
+    """re-submit the failed week. (`data_dir`: the level2 directory to ingest from, by default the
+    one of the failed week's release)"""
     failed = [e for e in manifest.values() if e["status"] == "failed"]
     if not failed:
         logger.info("no failed weeks to retry")
@@ -329,7 +438,7 @@ def retry_failed_week(manifest: dict, dry_run: bool) -> None:
     entry["notes"] = ""
     entry["warnings"] = []
 
-    _submit(entry, dry_run)
+    _submit(entry, dry_run, data_dir or release_level2_dir(entry_release(entry)))
 
 
 def scan_log_for_warnings(log_path: Path) -> list[str]:
@@ -391,30 +500,42 @@ def main():
         "--retry-failed", action="store_true",
         help="resubmit the failed week (only after you've fixed whatever caused it to fail) and exit",
     )
-    parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
+    parser.add_argument(
+        "--release", choices=sorted(RELEASE_DATA_DIR_VARS), default=DEFAULT_RELEASE,
+        help="the release to ingest. its data directory is TALLTABLE_DATA_DIR_QR3 (qr3) or TALLTABLE_DATA_DIR (qr2)",
+    )
+    parser.add_argument(
+        "--data-dir", type=Path, default=None,
+        help="the `level2` directory to look in (default: the release's data directory + /level2)",
+    )
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     args = parser.parse_args()
+    data_dir = args.data_dir
+
+    if args.retry_failed:
+        manifest = load_manifest(args.manifest)
+        retry_failed_week(manifest, args.dry_run, data_dir)
+        if not args.dry_run:
+            save_manifest(args.manifest, manifest)
+        return
+
+    if data_dir is None:
+        data_dir = release_level2_dir(args.release)
 
     if args.bootstrap:
         if args.manifest.exists():
             logger.error("%s already exists; refusing to overwrite. Remove it first if you really want to re-bootstrap.", args.manifest)
             return
-        manifest = bootstrap_manifest(args.data_dir)
+        manifest = bootstrap_manifest(data_dir, args.release)
         save_manifest(args.manifest, manifest)
         logger.info("wrote %d entries to %s", len(manifest), args.manifest)
         return
 
-    if args.retry_failed:
-        manifest = load_manifest(args.manifest)
-        retry_failed_week(manifest, args.dry_run)
-        if not args.dry_run:
-            save_manifest(args.manifest, manifest)
-        return
-
     manifest = load_manifest(args.manifest)
-    detect_new_weeks(manifest, args.data_dir)
+    # job status first: a week whose job has just completed is then checked for late files in the same pass
     check_job_status(manifest)
-    submit_ready_week(manifest, args.dry_run)
+    detect_new_weeks(manifest, data_dir, args.release)
+    submit_ready_week(manifest, args.dry_run, data_dir, args.release)
 
     if not args.dry_run:
         save_manifest(args.manifest, manifest)

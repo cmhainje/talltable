@@ -43,7 +43,7 @@ def extract_WCS(todo_tuple):
                 data[key] = header[key]
             return data
     except Exception as err:
-        print(f"warning: extraction failed for {_path}\n{err}")
+        print(f"warning: extraction failed for {filepath}\n{err}")
         return None
 
 
@@ -114,6 +114,9 @@ if __name__ == '__main__':
                 new_data.append(future.result())
 
     new_data = [ row for row in new_data if row is not None ]
+    if len(new_data) == 0:
+        print("warning: no WCS could be extracted from any of the files; not writing anything")
+        sys.exit(1)
 
     # cast to PyArrow table with columns sorted alphabetically
     new_table = pa.table({k: [row[k] for row in new_data] for k in sorted(keys + ['imageid'])})
@@ -127,7 +130,7 @@ if __name__ == '__main__':
     if WCS_DB_PATH.exists():
         print("merging into existing file...")
         old_table = pq.ParquetFile(WCS_DB_PATH).read()
-        table = pa.concat_tables(old_table, new_table)
+        table = pa.concat_tables([old_table, new_table])
         tmp_path = WCS_DB_PATH.with_suffix('.tmp')
         pq.write_table(
             table,
