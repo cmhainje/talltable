@@ -12,9 +12,10 @@ import struct
 
 from astropy.io import fits
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pathlib import Path
 from pyarrow import parquet as pq
 from pydantic import BaseModel, model_validator
@@ -30,6 +31,7 @@ from talltable.partition import (
 from talltable.paths import DB_DIR, IMAGE_DB_PATH, WAVES_DB_PATH, PIXEL_DB_PATH, PART_DB_PATH
 
 from . import extract
+from . import stats as st
 
 
 TMP_DB_PATH = Path("temp.duckdb")
@@ -146,6 +148,8 @@ class MaxBodySizeMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(MaxBodySizeMiddleware)
+stats = st.Stats()
+app.add_middleware(st.StatsMiddleware, stats=stats)  # added last: outermost, so it sees every response
 executor = ThreadPoolExecutor(max_workers=10)
 
 
@@ -187,7 +191,7 @@ class PartitionUnavailable(Exception):
 
 @app.exception_handler(PartitionUnavailable)
 async def partition_unavailable_handler(request: Request, exc: PartitionUnavailable):
-    request
+    st.set_result(request.scope, st.UNAVAILABLE)
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
@@ -199,7 +203,7 @@ class ServerBusy(Exception):
 
 @app.exception_handler(ServerBusy)
 async def server_busy_handler(request: Request, exc: ServerBusy):
-    request
+    st.set_result(request.scope, st.BUSY)
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
@@ -215,6 +219,16 @@ def get_con():
 @app.head("/")
 def status():
     return {"service": "talltable simple web service", "status": "running ok!"}
+
+
+@app.get("/status")
+def status_page(format: str = "html"):
+    """request rates, outcomes and durations per endpoint since startup (see stats.py)"""
+    waiting = len(getattr(query_slots, "_waiters", None) or ())  # asyncio keeps no public count
+    snap = stats.snapshot(MAX_PIXEL_QUERIES, MAX_PIXEL_QUERIES - query_slots._value, waiting)
+    if format == "json":
+        return snap
+    return HTMLResponse(st.render_html(snap))
 
 
 @app.post("/restart")
@@ -244,7 +258,8 @@ async def restart(authorization: str | None = Header(default=None)):
 # checking its partitions to the end of its result stream; the rest wait their turn, but no longer
 # than SLOT_WAIT_SEC (a waiting request sends nothing, and the load balancer in front drops idle
 # connections after 60 s), then get a 503 to retry.
-query_slots = asyncio.Semaphore(int(os.environ.get("TALLTABLE_MAX_PIXEL_QUERIES", 2)))
+MAX_PIXEL_QUERIES = int(os.environ.get("TALLTABLE_MAX_PIXEL_QUERIES", 2))
+query_slots = asyncio.Semaphore(MAX_PIXEL_QUERIES)
 SLOT_WAIT_SEC = 45.0
 
 
@@ -359,11 +374,12 @@ class SQLRequest(BaseModel):
 
 
 def stream_with_timeout(
-    gen, timeout_chunk=None, on_timeout=None, on_done=None
+    gen, timeout_chunk=None, on_timeout=None, on_done=None, on_result=None
 ):
     """`on_done` runs however the stream ends: completed, timed out, failed, or abandoned by a
     client that disconnected (the response then closes this generator; `on_timeout` is called
-    for that too, so the query stops rather than running on for nobody)."""
+    for that too, so the query stops rather than running on for nobody). `on_result` is told of a
+    timeout or a disconnect, for the /status statistics."""
     async def async_generator():
         loop = asyncio.get_event_loop()
         deadline = loop.time() + TIMEOUT_SEC
@@ -386,6 +402,8 @@ def stream_with_timeout(
                     break
         except asyncio.TimeoutError:
             stopped = True
+            if on_result is not None:
+                on_result(st.TIMEOUT)
             if on_timeout is not None:
                 on_timeout()
             # Don't call gen.close() — the thread is still running next(gen) and
@@ -395,6 +413,8 @@ def stream_with_timeout(
             if timeout_chunk is not None:
                 yield timeout_chunk
         finally:
+            if not stopped and on_result is not None:
+                on_result(st.DISCONNECTED)
             if not stopped and on_timeout is not None:
                 try:
                     on_timeout()
@@ -407,7 +427,7 @@ def stream_with_timeout(
 
 
 def arrow_stream(
-    sql: str, con: duckdb.DuckDBPyConnection, params=None, batch_rows: int = 10_000
+    sql: str, con: duckdb.DuckDBPyConnection, params=None, batch_rows: int = 10_000, on_result=None
 ):
     try:
         reader = con.execute(sql, params or []).fetch_record_batch(batch_rows)
@@ -426,6 +446,8 @@ def arrow_stream(
             yield _frame(tail)
         yield _status_frame(True)
     except duckdb.Error as e:
+        if on_result is not None:
+            on_result(st.QUERY_ERROR)
         yield _status_frame(False, str(e))
     finally:
         con.close()
@@ -451,21 +473,23 @@ async def start_query(req: SQLRequest):
 
 
 @app.post("/sql")
-async def sql(req: SQLRequest):
+async def sql(req: SQLRequest, request: Request):
     query, con, release = await start_query(req)
+    on_result = partial(st.set_result, request.scope)
     return StreamingResponse(
         stream_with_timeout(
-            arrow_stream(query, con),
+            arrow_stream(query, con, on_result=on_result),
             timeout_chunk=_status_frame(False, "Query timed out"),
             on_timeout=con.interrupt,
             on_done=release,
+            on_result=on_result,
         ),
         media_type="application/vnd.apache.arrow.stream",
     )
 
 
 def json_stream(
-    sql: str, con: duckdb.DuckDBPyConnection, params=None, batch_rows: int = 10_000
+    sql: str, con: duckdb.DuckDBPyConnection, params=None, batch_rows: int = 10_000, on_result=None
 ):
     yield '{"batches":['
     try:
@@ -486,20 +510,24 @@ def json_stream(
 
         yield '], "message": null}'
     except duckdb.Error as e:
+        if on_result is not None:
+            on_result(st.QUERY_ERROR)
         yield f'], "message": {json.dumps(str(e))}}}'
     finally:
         con.close()
 
 
 @app.post("/sql.json")
-async def sql_json(req: SQLRequest):
+async def sql_json(req: SQLRequest, request: Request):
     query, con, release = await start_query(req)
+    on_result = partial(st.set_result, request.scope)
     return StreamingResponse(
         stream_with_timeout(
-            json_stream(query, con),
+            json_stream(query, con, on_result=on_result),
             timeout_chunk=f'], "message": {json.dumps("Query timed out")}}}',
             on_timeout=con.interrupt,
             on_done=release,
+            on_result=on_result,
         ),
         media_type="application/json",
     )
