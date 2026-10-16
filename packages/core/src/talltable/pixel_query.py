@@ -7,7 +7,7 @@ import pyarrow as pa
 from pathlib import Path
 
 from talltable.constants import HP_HIGH_LEVEL, SERVICE_URL
-from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix
+from talltable.partition import find_partitions_disc, find_partitions_rect, find_partitions_ipix, part_to_level_index
 from talltable.query import choose_filter_level, indices_to_hphigh_ranges
 
 
@@ -67,6 +67,44 @@ def _disc_rect_hphigh_ranges(region) -> list[tuple[int, int]] | None:
 
     ranges = indices_to_hphigh_ranges(ipix_L, level)
     return ranges if len(ranges) <= _MAX_FILTER_RANGES else None
+
+
+def _hphigh_filter(ranges: list[tuple[int, int]]) -> str:
+    """
+    SQL keeping the pixels whose hphigh is in any of the (lo, hi) inclusive ranges.
+
+    The OR of the ranges is preceded by the single range enclosing them all: DuckDB can't use an
+    OR to skip row groups, so with the OR alone it decodes and tests every row of every partition.
+    The enclosing range it pushes into the Parquet scan, skipping every row group outside it (by
+    their min/max hphigh), and the OR is then evaluated only on what's left. Same rows; for a small
+    cone ~30-50x faster (measured 2026-10-16).
+    """
+    lo, hi = min(r[0] for r in ranges), max(r[1] for r in ranges)
+    clauses = [f"(p.hphigh BETWEEN {a} AND {b})" for a, b in ranges]
+    if len(clauses) == 1:
+        return clauses[0]
+    return f"p.hphigh BETWEEN {lo} AND {hi}\n  AND (\n    " + "\n    OR ".join(clauses) + "\n  )"
+
+
+def _clip_ranges(ranges: list[tuple[int, int]], part: int) -> list[tuple[int, int]]:
+    """the (lo, hi) inclusive hphigh ranges, cut down to the span of partition `part`"""
+    level, index = part_to_level_index(part)
+    shift = 2 * (HP_HIGH_LEVEL - level)
+    plo, phi = index << shift, ((index + 1) << shift) - 1
+    return [(max(lo, plo), min(hi, phi)) for lo, hi in ranges if lo <= phi and hi >= plo]
+
+
+def _render_where(conditions: list[str]) -> str:
+    """a WHERE clause from conditions, each either an expression or a '-- comment\\n  expression'"""
+    where_lines = ["WHERE"]
+    for i, cond in enumerate(conditions):
+        if cond.startswith("--"):
+            comment, expr = cond.split("\n  ", 1)
+            where_lines.append(f"  {comment}")
+            where_lines.append(f"  AND {expr}" if i > 0 else f"  {expr}")
+        else:
+            where_lines.append(f"  AND {cond}" if i > 0 else f"  {cond}")
+    return "\n".join(where_lines)
 
 
 class PixelQuery:
@@ -213,23 +251,51 @@ class PixelQuery:
     # --- SQL ---
 
     def sql(self) -> str:
-        """Return the SQL query string."""
+        """Return the SQL query string, reading from a table named `pixels` (the partitions the
+        web service substitutes for it are passed separately; see `partitions()`)."""
         if self._region is None:
             raise ValueError("Region must be specified before calling sql()")
-        return self._build_sql("pixels", "waves", "images")
+        return self._build_sql([("pixels", None)], "waves", "images")
+
+    def _web_sql(self, parts: list[int]) -> str:
+        """The SQL `execute()` sends to the web service: one subquery per partition, each reading a
+        table `pixels_<part>` that the service replaces with that partition's file."""
+        return self._build_sql([(f"pixels_{p}", p) for p in parts], "waves", "images")
 
     def _local_sql(self, parts: list[int]) -> str:
         from talltable.paths import PIXEL_DB_PATH, WAVES_DB_PATH, IMAGE_DB_PATH
-        paths = [f"'{PIXEL_DB_PATH / f'part={p}/compacted.parquet'}'" for p in parts]
-        if len(paths) == 1:
-            pixel_source = f"read_parquet({paths[0]})"
-        else:
-            pixel_source = f"read_parquet([{', '.join(paths)}])"
+        sources = [(f"read_parquet('{PIXEL_DB_PATH / f'part={p}/compacted.parquet'}')", p) for p in parts]
         waves_source = f"read_parquet('{WAVES_DB_PATH}')"
         images_source = f"read_parquet('{IMAGE_DB_PATH}')"
-        return self._build_sql(pixel_source, waves_source, images_source)
+        return self._build_sql(sources, waves_source, images_source)
 
-    def _build_sql(self, pixel_source: str, waves_source: str, images_source: str) -> str:
+    def _region_filter(self) -> tuple[list[tuple[int, int]] | None, str | None]:
+        """The region's hphigh ranges and a comment describing them, or (None, None) when the
+        region is large enough that partition selection alone is used (see _disc_rect_hphigh_ranges)."""
+        kind = self._region[0]
+        if kind == "ipix":
+            _, indices, level = self._region
+            return indices_to_hphigh_ranges(indices, level), f"-- ipix, level {level}"
+        ranges = _disc_rect_hphigh_ranges(self._region)
+        if not ranges:
+            return None, None
+        filter_level = choose_filter_level(_region_area_deg2(self._region))
+        if kind == "disc":
+            _, ra, dec, radius = self._region
+            comment = f"-- disc(ra={ra}, dec={dec}, radius={radius}°), level-{filter_level} hphigh ranges"
+        else:
+            _, ra, dec, width, height = self._region
+            comment = f"-- rect(ra={ra}, dec={dec}, width={width}°, height={height}°), level-{filter_level} hphigh ranges"
+        return ranges, comment
+
+    def _build_sql(self, pixel_sources: list[tuple[str, int | None]], waves_source: str, images_source: str) -> str:
+        """`pixel_sources`: (table expression, partition) pairs; the partition (None: unknown) clips
+        the region's hphigh ranges to its own, so each source's filter is as tight as it can be.
+
+        Several sources become a UNION ALL of per-partition subqueries, each with its own enclosing
+        hphigh range: a single enclosing range over partitions far apart in hphigh would span
+        everything between them and let DuckDB skip nothing (measured 3.7-4.8x faster for
+        multi-partition cones, 2026-10-16)."""
         # SELECT columns
         cols = [
             "p.waveid", "p.flux", "p.variance", "p.zodi",
@@ -259,8 +325,38 @@ class PixelQuery:
                 f")"
             )
 
+        # per-source WHERE conditions: the region (clipped to the source's partition) and quality flags
+        ranges, comment = self._region_filter()
+
+        def conditions_for(part):
+            conditions = []
+            if ranges is not None:
+                rs = ranges if part is None else _clip_ranges(ranges, part)
+                if rs:
+                    conditions.append(comment + "\n  " + _hphigh_filter(rs))
+            conditions.append(f"-- quality flags\n  {self._flags_sql}")
+            return conditions
+
+        if ranges is not None and len(pixel_sources) > 1:
+            # partitions with none of the region's ranges contribute no rows; drop them (unless
+            # that would drop them all)
+            kept = [(src, part) for src, part in pixel_sources if part is None or _clip_ranges(ranges, part)]
+            pixel_sources = kept or pixel_sources[:1]
+
+        if len(pixel_sources) == 1:
+            src, part = pixel_sources[0]
+            source = src
+            conditions = conditions_for(part)
+        else:
+            subqueries = [
+                f"    SELECT * FROM {src} p\n    " + _render_where(conditions_for(part)).replace("\n", "\n    ")
+                for src, part in pixel_sources
+            ]
+            source = "(\n" + "\n    UNION ALL\n".join(subqueries) + "\n)"
+            conditions = []
+
         # FROM + JOINs
-        froms = [f"FROM {pixel_source} p"]
+        froms = [f"FROM {source} p"]
         if self._wavelength is not None:
             froms.append("JOIN selected_waves w ON p.waveid = w.waveid")
         elif self._with_wavelengths:
@@ -268,46 +364,12 @@ class PixelQuery:
         if self._with_image:
             froms.append(f"LEFT JOIN {images_source} i ON p.imageid = i.imageid")
 
-        # WHERE conditions
-        conditions = []
-        kind = self._region[0]
-        if kind == "ipix":
-            _, indices, level = self._region
-            ranges = indices_to_hphigh_ranges(indices, level)
-            comment = f"-- ipix, level {level}"
-            clauses = [f"(p.hphigh BETWEEN {lo} AND {hi})" for lo, hi in ranges]
-            body = clauses[0] if len(clauses) == 1 else "(\n    " + "\n    OR ".join(clauses) + "\n  )"
-            conditions.append(comment + "\n  " + body)
-        elif kind in ("disc", "rect"):
-            ranges = _disc_rect_hphigh_ranges(self._region)
-            if ranges:
-                filter_level = choose_filter_level(_region_area_deg2(self._region))
-                if kind == "disc":
-                    _, ra, dec, radius = self._region
-                    comment = f"-- disc(ra={ra}, dec={dec}, radius={radius}°), level-{filter_level} hphigh ranges"
-                else:
-                    _, ra, dec, width, height = self._region
-                    comment = f"-- rect(ra={ra}, dec={dec}, width={width}°, height={height}°), level-{filter_level} hphigh ranges"
-                clauses = [f"(p.hphigh BETWEEN {lo} AND {hi})" for lo, hi in ranges]
-                body = clauses[0] if len(clauses) == 1 else "(\n    " + "\n    OR ".join(clauses) + "\n  )"
-                conditions.append(comment + "\n  " + body)
-
-        conditions.append(f"-- quality flags\n  {self._flags_sql}")
-
-        where_lines = ["WHERE"]
-        for i, cond in enumerate(conditions):
-            if cond.startswith("--"):
-                comment, expr = cond.split("\n  ", 1)
-                where_lines.append(f"  {comment}")
-                where_lines.append(f"  AND {expr}" if i > 0 else f"  {expr}")
-            else:
-                where_lines.append(f"  AND {cond}" if i > 0 else f"  {cond}")
-        where = "\n".join(where_lines)
-
         parts = []
         if cte is not None:
             parts.append(cte)
-        parts += [select] + froms + [where]
+        parts += [select] + froms
+        if conditions:
+            parts.append(_render_where(conditions))
         return "\n".join(parts)
 
     # --- execute ---
@@ -319,7 +381,7 @@ class PixelQuery:
             from talltable.client import fetch_arrow_stream
             return fetch_arrow_stream(
                 f"{self._base_url}/sql",
-                {"query": self.sql(), "partitions": parts},
+                {"query": self._web_sql(parts), "partitions": parts},
             )
         else:
             import duckdb
@@ -336,7 +398,7 @@ class PixelQuery:
             from talltable.client import fetch_arrow_to_parquet
             fetch_arrow_to_parquet(
                 f"{self._base_url}/sql",
-                {"query": self.sql(), "partitions": parts},
+                {"query": self._web_sql(parts), "partitions": parts},
                 output,
             )
         else:

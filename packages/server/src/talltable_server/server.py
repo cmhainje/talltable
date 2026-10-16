@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import pyarrow.ipc as ipc
+import re
 import secrets
 import signal
 import struct
@@ -190,6 +191,18 @@ async def partition_unavailable_handler(request: Request, exc: PartitionUnavaila
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+class ServerBusy(Exception):
+    """No pixel query slot became free in time."""
+    def __init__(self):
+        super().__init__("the server is busy with other queries; please retry shortly")
+
+
+@app.exception_handler(ServerBusy)
+async def server_busy_handler(request: Request, exc: ServerBusy):
+    request
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
 def get_con():
     # inherits the lockdown already applied on _lockdown_con — see its comment
     return duckdb.connect(TMP_DB_PATH, read_only=True, config=_con_config())
@@ -226,25 +239,59 @@ async def restart(authorization: str | None = Header(default=None)):
 # *** SQL ***
 
 
-prefetch_sem = asyncio.Semaphore(2)
+# Pixel queries run (at most) this many at a time; more and they slow each other down until all of
+# them time out and the server looks down to everyone. A slot is held for the whole query, from
+# checking its partitions to the end of its result stream; the rest wait their turn, but no longer
+# than SLOT_WAIT_SEC (a waiting request sends nothing, and the load balancer in front drops idle
+# connections after 60 s), then get a 503 to retry.
+query_slots = asyncio.Semaphore(int(os.environ.get("TALLTABLE_MAX_PIXEL_QUERIES", 2)))
+SLOT_WAIT_SEC = 45.0
 
-def warm(part, path):
-    try:
-        with open(path, 'rb') as f:
-            while f.read(4*1024*1024):
+
+class QuerySlot:
+    """A pixel query slot, given back exactly once: by release() when the query's stream ends, or
+    else when this is garbage collected (a response whose stream never started, e.g. because the
+    client left first, never runs the stream's cleanup)."""
+
+    def __init__(self):
+        self._loop = asyncio.get_running_loop()
+        self._held = True
+
+    def release(self):
+        if self._held:
+            self._held = False
+            try:
+                self._loop.call_soon_threadsafe(query_slots.release)
+            except RuntimeError:  # event loop closed: shutting down
                 pass
-    except OSError as e:
-        if part in ALL_PARTS:
-            raise PartitionUnavailable(part) from e
-        raise ValueError(f"partition file not found ({part})") from e
 
-async def prefetch_files(parts_paths, max_workers=16):
-    async with prefetch_sem:
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            await asyncio.gather(
-                *[loop.run_in_executor(ex, warm, p, path) for p, path in parts_paths]
-            )
+    def __del__(self):
+        self.release()
+
+
+async def acquire_query_slot() -> QuerySlot:
+    try:
+        await asyncio.wait_for(query_slots.acquire(), timeout=SLOT_WAIT_SEC)
+    except asyncio.TimeoutError:
+        raise ServerBusy()
+    return QuerySlot()
+
+
+def check_partition(part, path):
+    """A pixel query's partition file must exist: if it doesn't, the partition is either known but
+    mid-split (503, retry) or not a partition at all (422).
+
+    (This used to read the whole file first, to warm it. Since PixelQuery's filters let DuckDB skip
+    the row groups a query doesn't need, that only cost time: ~4 s for a 2' cone that runs in ~1 s
+    without it. Measured 2026-10-16.)"""
+    if not path.exists():
+        if part in ALL_PARTS:
+            raise PartitionUnavailable(part)
+        raise ValueError(f"partition file not found ({part})")
+
+
+async def check_partitions(parts_paths):
+    await asyncio.to_thread(lambda: [check_partition(p, path) for p, path in parts_paths])
 
 
 def parse_sql(sql):
@@ -254,9 +301,14 @@ def parse_sql(sql):
         raise ValueError(str(e))
 
 
+# besides `pixels` (all of the request's partitions), a query may read `pixels_<part>`: just that one
+# of the request's partitions. PixelQuery uses it to give each partition its own hphigh filter.
+PIXELS_PART_TABLE = re.compile(r"pixels_(\d+)")
+
+
 def uses_pixels(sql):
     for table in parse_sql(sql).find_all(exp.Table):
-        if table.name == "pixels":
+        if table.name == "pixels" or PIXELS_PART_TABLE.fullmatch(table.name):
             return True
     return False
 
@@ -283,13 +335,21 @@ class SQLRequest(BaseModel):
             partition_sql = f"[{partition_sql}]"
 
         def transformer(node):
-            if isinstance(node, exp.Table) and node.name == "pixels":
+            if not isinstance(node, exp.Table):
+                return node
+            if node.name == "pixels":
                 repl = parse_sql(f"read_parquet({partition_sql})")
-                alias = node.args.get("alias")
-                if alias:
-                    return exp.Alias(this=repl, alias=alias)
-                return repl
-            return node
+            elif m := PIXELS_PART_TABLE.fullmatch(node.name):
+                part = int(m[1])
+                if part not in self.partitions:
+                    raise ValueError(f"{node.name}: partition {part} is not among the request's partitions")
+                repl = parse_sql(f"read_parquet('{part_path(part)}')")
+            else:
+                return node
+            alias = node.args.get("alias")
+            if alias:
+                return exp.Alias(this=repl, alias=alias)
+            return repl
 
         return (
             parse_sql(self.query)
@@ -299,11 +359,15 @@ class SQLRequest(BaseModel):
 
 
 def stream_with_timeout(
-    gen, timeout_chunk=None, on_timeout=None
+    gen, timeout_chunk=None, on_timeout=None, on_done=None
 ):
+    """`on_done` runs however the stream ends: completed, timed out, failed, or abandoned by a
+    client that disconnected (the response then closes this generator; `on_timeout` is called
+    for that too, so the query stops rather than running on for nobody)."""
     async def async_generator():
         loop = asyncio.get_event_loop()
         deadline = loop.time() + TIMEOUT_SEC
+        stopped = False  # finished, or already interrupted on timeout
         try:
             while True:
                 remaining = deadline - loop.time()
@@ -318,8 +382,10 @@ def stream_with_timeout(
                 except (StopIteration, RuntimeError) as e:
                     if isinstance(e, RuntimeError) and "StopIteration" not in str(e):
                         raise
+                    stopped = True
                     break
         except asyncio.TimeoutError:
+            stopped = True
             if on_timeout is not None:
                 on_timeout()
             # Don't call gen.close() — the thread is still running next(gen) and
@@ -328,6 +394,14 @@ def stream_with_timeout(
             # naturally once the thread returns.
             if timeout_chunk is not None:
                 yield timeout_chunk
+        finally:
+            if not stopped and on_timeout is not None:
+                try:
+                    on_timeout()
+                except Exception:  # e.g. the query already failed and closed its connection
+                    pass
+            if on_done is not None:
+                on_done()
 
     return async_generator()
 
@@ -357,20 +431,34 @@ def arrow_stream(
         con.close()
 
 
+async def start_query(req: SQLRequest):
+    """Take a pixel query slot (if it's a pixel query) and get the query ready to stream: returns
+    (the query, a connection, the function that gives the slot back, or None)."""
+    slot = await acquire_query_slot() if req.partitions is not None else None
+    try:
+        if req.partitions is not None:
+            parts_paths = [
+                (p, PIXEL_DB_PATH / f'part={p}/compacted.parquet') for p in req.partitions
+            ]
+            await check_partitions(parts_paths)
+        query = req.into_sql()
+        con = get_con()
+    except BaseException:
+        if slot is not None:
+            slot.release()
+        raise
+    return query, con, (slot.release if slot is not None else None)
+
+
 @app.post("/sql")
 async def sql(req: SQLRequest):
-    if req.partitions is not None:
-        parts_paths = [
-            (p, PIXEL_DB_PATH / f'part={p}/compacted.parquet') for p in req.partitions
-        ]
-        await prefetch_files(parts_paths)
-
-    con = get_con()
+    query, con, release = await start_query(req)
     return StreamingResponse(
         stream_with_timeout(
-            arrow_stream(req.into_sql(), con),
+            arrow_stream(query, con),
             timeout_chunk=_status_frame(False, "Query timed out"),
             on_timeout=con.interrupt,
+            on_done=release,
         ),
         media_type="application/vnd.apache.arrow.stream",
     )
@@ -405,18 +493,13 @@ def json_stream(
 
 @app.post("/sql.json")
 async def sql_json(req: SQLRequest):
-    if req.partitions is not None:
-        parts_paths = [
-            (p, PIXEL_DB_PATH / f'part={p}/compacted.parquet') for p in req.partitions
-        ]
-        await prefetch_files(parts_paths)
-
-    con = get_con()
+    query, con, release = await start_query(req)
     return StreamingResponse(
         stream_with_timeout(
-            json_stream(req.into_sql(), con),
+            json_stream(query, con),
             timeout_chunk=f'], "message": {json.dumps("Query timed out")}}}',
             on_timeout=con.interrupt,
+            on_done=release,
         ),
         media_type="application/json",
     )
@@ -460,9 +543,9 @@ def partitions_rect(ra: float, dec: float, width: float, height: float):
 # *** PHOTOMETRY ***
 
 
-def _warm_parts(parts):
+def _check_parts(parts):
     for p in parts:
-        warm(p, PIXEL_DB_PATH / f"part={p}/compacted.parquet")
+        check_partition(p, PIXEL_DB_PATH / f"part={p}/compacted.parquet")
 
 
 class FakeArgs:
@@ -495,7 +578,7 @@ class PhotometryRequest(BaseModel):
 def photometry(ra: float, dec: float, pm_ra: float | None = None, pm_dec: float | None = None, ref_epoch: float = 57388.0):
     con = get_con()
     try:
-        results = extract.process_target("_", ra, dec, pm_ra, pm_dec, ref_epoch, FakeArgs(), con=con, warm_fn=_warm_parts)
+        results = extract.process_target("_", ra, dec, pm_ra, pm_dec, ref_epoch, FakeArgs(), con=con, warm_fn=_check_parts)
     finally:
         con.close()
     return results
@@ -516,7 +599,7 @@ def photometry(ra: float, dec: float, pm_ra: float | None = None, pm_dec: float 
 #                 r.pm_ra, r.pm_dec, r.ref_epoch,
 #                 FakeArgs(),
 #                 con=con,
-#                 warm_fn=_warm_parts,
+#                 warm_fn=_check_parts,
 #             )
 #             all_results.append(results)
 #     finally:
