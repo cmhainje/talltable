@@ -40,7 +40,12 @@ def extract_WCS(todo_tuple):
             header = hdul["IMAGE"].header
             data = { "imageid": imageid }
             for key in keys:
-                data[key] = header[key]
+                if key.startswith(("A_", "B_")):
+                    # SIP convention: an absent coefficient is zero (some QR2 headers omit the
+                    # zero ones, e.g. A_0_0; astropy's WCS reads them the same way)
+                    data[key] = header.get(key, 0.0)
+                else:
+                    data[key] = header[key]
             return data
     except Exception as err:
         print(f"warning: extraction failed for {filepath}\n{err}")

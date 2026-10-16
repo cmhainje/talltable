@@ -21,6 +21,7 @@ from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from talltable.paths import (
+    COMPACTION_ROUND_PATH,
     IMAGE_DB_PATH,
     PIXEL_DB_PATH,
     IMAGE_PARTS_DIR,
@@ -90,6 +91,13 @@ def main(args):
         raise RuntimeError(
             f"there are existing image part files in {IMAGE_PARTS_DIR}! "
             "did you run `compact` after the last `ingest`?"
+        )
+    if COMPACTION_ROUND_PATH.exists():
+        # new chunk files would join a round that is partly done: compact.py would then refuse to
+        # run (it checks the round's chunk files), but stop here before writing any
+        raise RuntimeError(
+            f"a compaction round is unfinished ({COMPACTION_ROUND_PATH} exists)! "
+            "finish it (`compact`, then `post_compact`) before ingesting more"
         )
 
     with open(args.infile, "r") as f:

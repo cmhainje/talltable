@@ -4,7 +4,15 @@ import pyarrow.parquet as pq
 
 from pathlib import Path
 
-from talltable.paths import DB_DIR, PIXEL_DB_PATH, IMAGE_DB_PATH, IMAGE_PARTS_DIR, PART_DB_PATH, SCRATCH_DIR
+from talltable.paths import (
+    COMPACTION_ROUND_PATH,
+    DB_DIR,
+    IMAGE_DB_PATH,
+    IMAGE_PARTS_DIR,
+    PART_DB_PATH,
+    PIXEL_DB_PATH,
+    SCRATCH_DIR,
+)
 
 
 logging.basicConfig(
@@ -13,15 +21,6 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
-
-
-def promote_staging_files():
-    """Rename all compacted_new.parquet -> compacted.parquet (atomic per file)."""
-    staging_files = sorted(PIXEL_DB_PATH.glob("**/compacted_new.parquet"))
-    logger.info(f"promoting {len(staging_files)} staging files")
-    for f in staging_files:
-        target = f.parent / "compacted.parquet"
-        f.replace(target)
 
 
 def cleanup_split_parents():
@@ -71,6 +70,13 @@ def delete_bin_chunks():
     logger.info(f"deleted {len(chunks)} binary chunks")
 
 
+def end_compaction_round():
+    """Remove compact.py's round file. Only once the round's chunk files are gone: until then, a
+    re-run of compact.py must find the same round, so that it skips the partitions it already did."""
+    COMPACTION_ROUND_PATH.unlink(missing_ok=True)
+    logger.info(f"removed {COMPACTION_ROUND_PATH}")
+
+
 def write_parts_list():
     """Write the list of partition directories."""
     partitions = sorted(
@@ -83,11 +89,24 @@ def write_parts_list():
     logger.info(f"found {len(partitions)} partitions, wrote to {PART_DB_PATH}")
 
 
+def cleanup_partial_writes():
+    """Remove outputs a killed compaction left half-written (compact.py's WRITING_NAME), and the
+    partition directories that leaves empty (a split child that was never completed)."""
+    partial = sorted(PIXEL_DB_PATH.glob("*/compacted_writing.parquet"))
+    logger.info(f"removing {len(partial)} partially written files")
+    for f in partial:
+        f.unlink()
+        if not any(f.parent.iterdir()):
+            f.parent.rmdir()
+
+
 def main():
-    promote_staging_files()
+    # (compact.py replaces each partition's compacted.parquet in place; only splits are left to finish)
     cleanup_split_parents()
+    cleanup_partial_writes()
     merge_image_parts()
     delete_bin_chunks()
+    end_compaction_round()
     write_parts_list()
 
 

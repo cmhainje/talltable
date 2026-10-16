@@ -32,6 +32,10 @@ WCS_DB_PATH     = DB_DIR / "wcs.parquet"
 IMAGE_PARTS_DIR = DB_DIR / "image_parts"
 PART_DB_PATH    = DB_DIR / "parts.txt"
 
+# identifies the current compaction round (one per batch of chunk files): created by compact.py,
+# removed by post_compact.py once the round's chunk files are gone
+COMPACTION_ROUND_PATH = SCRATCH_DIR / "compaction_round.json"
+
 
 def image_part_path(task_id: int) -> Path:
     return IMAGE_PARTS_DIR / f"image_task{task_id}.parquet"

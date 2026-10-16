@@ -4,6 +4,7 @@
 #SBATCH --nodes 1
 #SBATCH --ntasks-per-node 1
 #SBATCH --cpus-per-task 48
+#SBATCH -t 1-12:00:00
 #SBATCH -o /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
 #SBATCH -e /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
 #SBATCH --mail-type ALL

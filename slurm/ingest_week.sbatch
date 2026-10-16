@@ -1,8 +1,12 @@
 #!/bin/bash
 #SBATCH -C icelake
-#SBATCH --nodes 2
-#SBATCH --ntasks-per-node 48
+# 96 tasks over 4 nodes rather than 2: each node's I/O goes through its own ceph-fuse daemon, which
+# saturates at ~24 tasks (profiled 2026-10-16, scripts/profile_compact.py). Keep 96 tasks: ingest
+# writes a chunk file per task per 24 images, and more tasks mean more, smaller slices to read back.
+#SBATCH --nodes 4
+#SBATCH --ntasks-per-node 24
 #SBATCH --cpus-per-task 1
+#SBATCH -t 1-12:00:00
 #SBATCH -o /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
 #SBATCH -e /mnt/home/chainje/spxperiments/slurm/slurm-%x-%j.out
 #SBATCH --mail-type ALL
