@@ -6,12 +6,16 @@ messages quote the user's SQL, so failures are recorded by category only.
 """
 
 import html
+import logging
 import time
 
 from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 
 from starlette.requests import ClientDisconnect
+
+# the pod's log (private, unlike /status): one line per request that didn't end ok, with the client
+logger = logging.getLogger("uvicorn")
 
 WINDOWS = [("1 min", 60), ("15 min", 900), ("1 h", 3600), ("24 h", 86400)]
 DURATION_WINDOW_SEC = 3600
@@ -57,6 +61,7 @@ class Stats:
         self.totals[(endpoint, result)] += 1
         if result != "ok":
             self.failures.append((now, endpoint, status, result))
+        return result
 
     def snapshot(self, slots_total, slots_in_use, slots_waiting):
         now = time.time()
@@ -133,12 +138,14 @@ class StatsMiddleware:
             return await self.app(scope, receive, send)
 
         endpoint = self.stats.endpoint(scope["app"], scope["method"], scope["path"])
-        rec = {"status": None, "result": None, "wait": None}
+        rec = {"status": None, "result": None, "wait": None, "sent": 0}
         scope.setdefault("state", {})["stats"] = rec
 
         async def send_status(message):
             if message["type"] == "http.response.start":
                 rec["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                rec["sent"] += len(message.get("body", b""))
             await send(message)
 
         t0 = time.monotonic()
@@ -153,7 +160,17 @@ class StatsMiddleware:
             raise
         finally:
             self.stats.in_flight[endpoint] -= 1
-            self.stats.finish(endpoint, rec["status"], rec["result"], time.monotonic() - t0, rec["wait"])
+            duration = time.monotonic() - t0
+            result = self.stats.finish(endpoint, rec["status"], rec["result"], duration, rec["wait"])
+            if result != "ok":
+                client = scope.get("client") or ("?", 0)
+                wait = rec["wait"]
+                timing = (f"waited {wait:.1f}s for a slot, ran {duration - wait:.1f}s" if wait is not None
+                          else "no slot")
+                logger.warning(
+                    f'{client[0]} "{scope["method"]} {scope["path"]}" {result} (HTTP {rec["status"]}) '
+                    f'after {duration:.1f}s: {timing}, sent {rec["sent"]} bytes'
+                )
 
 
 def set_result(scope, result):
