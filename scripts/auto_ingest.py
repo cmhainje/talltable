@@ -17,6 +17,7 @@ usage:
     uv run python scripts/auto_ingest.py              # normal run
     uv run python scripts/auto_ingest.py --dry-run    # don't submit or write manifest
     uv run python scripts/auto_ingest.py --bootstrap  # one-time: seed manifest from DB
+    uv run python scripts/auto_ingest.py --force 2026W36  # submit a week now, skipping the stability gate
 
 suggested crontab line:
 
@@ -51,11 +52,10 @@ WEEK_DIR_RE = re.compile(r"^(\d{4})W(\d{2})_")
 WARNING_RE = re.compile(r"traceback|error|warning", re.IGNORECASE)
 IGNORED_WARNING_RE = re.compile(r"deprecationwarning", re.IGNORECASE)
 
-# a week is safe to ingest once its file count is unchanged
-# for two checks at least this far apart
+# a week is safe to ingest once its file count has been unchanged for at least this long
 STABILITY_MIN_GAP = timedelta(hours=20)
 
-# ...or once no FITS file has been modified in this long (see is_stable)
+# ...or once no FITS file has arrived in this long (see is_stable)
 NO_NEW_FILES_THRESHOLD = timedelta(days=7)
 
 MAX_WARNINGS_STORED = 20
@@ -142,7 +142,7 @@ def bootstrap_manifest(data_dir: Path, release: str) -> dict:
             "folders": folders,
             "file_counts_by_check": [],
             "file_count_at_submit": count,  # the baseline that new files are detected against
-            "latest_file_mtime": None,
+            "latest_file_ctime": None,
             "status": "done",
             "detected_at": None,
             "submitted_at": None,
@@ -196,7 +196,7 @@ def reopen_if_new_files(key: str, entry: dict, data_dir: Path, folders: list[str
         status="detected",
         folders=sorted(folders),
         file_counts_by_check=[],
-        latest_file_mtime=None,
+        latest_file_ctime=None,
         job_id=None,
         job_name=None,
         log_path=None,
@@ -245,7 +245,7 @@ def detect_new_weeks(manifest: dict, data_dir: Path, release: str) -> None:
                 "folders": sorted(folders),
                 "file_counts_by_check": [],
                 "file_count_at_submit": None,
-                "latest_file_mtime": None,
+                "latest_file_ctime": None,
                 "status": "detected",
                 "detected_at": now_iso(),
                 "submitted_at": None,
@@ -281,19 +281,20 @@ def detect_new_weeks(manifest: dict, data_dir: Path, release: str) -> None:
         # matches ingest_week.sbatch's `find -mindepth 4 -maxdepth 4` relative to
         # data_dir: two subdirectory levels under each week folder, then the file
         count = 0
-        latest_mtime = 0.0
+        latest_ctime = 0.0
         filepaths = []
         for d in folders:
             for f in (data_dir / d).glob("*/*/*.fits"):
                 count += 1
-                latest_mtime = max(latest_mtime, f.stat().st_mtime)
+                latest_ctime = max(latest_ctime, f.stat().st_ctime)
                 filepaths.append(str(f))
 
         entry["file_counts_by_check"].append({"ts": now_iso(), "count": count})
-        if latest_mtime:
-            entry["latest_file_mtime"] = datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat()
+        entry.pop("latest_file_mtime", None)  # replaced by latest_file_ctime, see is_stable
+        if latest_ctime:
+            entry["latest_file_ctime"] = datetime.fromtimestamp(latest_ctime, tz=timezone.utc).isoformat()
 
-        # we're already paying the cost of walking every file for the count/mtime
+        # we're already paying the cost of walking every file for the count/ctime
         # above, so write out ingest_week.sbatch's file list here for free -- it
         # checks for this file and skips its own (much slower, serial) `find` if
         # it's already present
@@ -305,25 +306,29 @@ def detect_new_weeks(manifest: dict, data_dir: Path, release: str) -> None:
 
 def is_stable(entry: dict) -> bool:
     """ready to ingest once either:
-        (a) the file count hasn't changed for at least STABILITY_MIN_GAP
-        (b) no file has been modified in over NO_NEW_FILES_THRESHOLD
+        (a) the file count has been the same at every check for at least STABILITY_MIN_GAP
+            (from the first check that saw the current count to the latest one)
+        (b) no file has arrived in over NO_NEW_FILES_THRESHOLD
 
-    note that files are downloaded from S3, so mtime is reliable estimate for download time"""
-    latest_mtime = entry.get("latest_file_mtime")
-    if latest_mtime is not None:
-        age = datetime.now(timezone.utc) - datetime.fromisoformat(latest_mtime)
+    (b) uses ctime, not mtime: the S3 download (`aws s3 sync`/`cp`) sets each file's mtime to the
+    object's LastModified, which can be days before the file reached this cluster. ctime can't be set
+    that way, so it is when the file was written here (or later, if its metadata changed since)."""
+    latest_ctime = entry.get("latest_file_ctime")
+    if latest_ctime is not None:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(latest_ctime)
         if age >= NO_NEW_FILES_THRESHOLD:
             return True
 
     samples = entry["file_counts_by_check"]
-    if len(samples) < 2:
+    if not samples or samples[-1]["count"] == 0:
         return False
-    a, b = samples[-2], samples[-1]
-    if a["count"] == 0 or a["count"] != b["count"]:
-        return False
-    ts_a = datetime.fromisoformat(a["ts"])
-    ts_b = datetime.fromisoformat(b["ts"])
-    return (ts_b - ts_a) >= STABILITY_MIN_GAP
+    count = samples[-1]["count"]
+    first = len(samples) - 1
+    while first > 0 and samples[first - 1]["count"] == count:
+        first -= 1
+    ts_first = datetime.fromisoformat(samples[first]["ts"])
+    ts_last = datetime.fromisoformat(samples[-1]["ts"])
+    return (ts_last - ts_first) >= STABILITY_MIN_GAP
 
 
 def _submit(entry: dict, dry_run: bool, data_dir: Path) -> None:
@@ -364,8 +369,8 @@ def _submit(entry: dict, dry_run: bool, data_dir: Path) -> None:
     logger.info("submitted %s as job %s", week_key(year, week), job_id)
 
 
-def submit_ready_week(manifest: dict, dry_run: bool, data_dir: Path, release: str) -> None:
-    """submit a week's ingest job (of the given release).
+def submission_blocked(manifest: dict) -> bool:
+    """whether a new submission must wait: a week has failed, or an ingest job is already in flight.
 
     note: NEVER run more than one at a time: post_compact.py will NOT handle that gracefully"""
     failed = [e for e in manifest.values() if e["status"] == "failed"]
@@ -375,7 +380,7 @@ def submit_ready_week(manifest: dict, dry_run: bool, data_dir: Path, release: st
             "retry with --retry-failed",
             week_key(failed[0]["year"], failed[0]["week"]), failed[0]["job_id"],
         )
-        return
+        return True
 
     in_flight = [e for e in manifest.values() if e["status"] == "submitted"]
     if in_flight:
@@ -383,6 +388,14 @@ def submit_ready_week(manifest: dict, dry_run: bool, data_dir: Path, release: st
             "week %s is already submitted (job %s); skipping new submissions this run",
             week_key(in_flight[0]["year"], in_flight[0]["week"]), in_flight[0]["job_id"],
         )
+        return True
+
+    return False
+
+
+def submit_ready_week(manifest: dict, dry_run: bool, data_dir: Path, release: str) -> None:
+    """submit a week's ingest job (of the given release)."""
+    if submission_blocked(manifest):
         return
 
     candidates = sorted(
@@ -396,6 +409,29 @@ def submit_ready_week(manifest: dict, dry_run: bool, data_dir: Path, release: st
         return
 
     _submit(candidates[0], dry_run, data_dir)
+
+
+def force_submit_week(manifest: dict, key: str, dry_run: bool, data_dir: Path, release: str) -> None:
+    """submit the given week now, whether or not it is stable yet. the one-job-at-a-time and
+    halt-on-failure rules still apply."""
+    entry = manifest.get(key)
+    if entry is None:
+        logger.error("--force %s: no such week in the manifest (not in %s?)", key, data_dir)
+        return
+    if entry_release(entry) != release:
+        logger.error("--force %s: it is a %s week; rerun with --release %s", key, entry_release(entry), entry_release(entry))
+        return
+    if entry["status"] != "detected":
+        logger.error("--force %s: status is %s, not detected", key, entry["status"])
+        return
+    if submission_blocked(manifest):
+        return
+
+    if not is_stable(entry):
+        logger.info("%s: forcing submission past the stability gate (count %s)", key, entry["file_counts_by_check"][-1]["count"])
+        if not dry_run:
+            entry["forced_at"] = now_iso()
+    _submit(entry, dry_run, data_dir)
 
 
 def retry_failed_week(manifest: dict, dry_run: bool, data_dir: Path | None) -> None:
@@ -508,6 +544,10 @@ def main():
         "--data-dir", type=Path, default=None,
         help="the `level2` directory to look in (default: the release's data directory + /level2)",
     )
+    parser.add_argument(
+        "--force", metavar="YYYYWww",
+        help="submit this week now even if it isn't stable yet (still never while another job is in flight)",
+    )
     parser.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     args = parser.parse_args()
     data_dir = args.data_dir
@@ -535,7 +575,10 @@ def main():
     # job status first: a week whose job has just completed is then checked for late files in the same pass
     check_job_status(manifest)
     detect_new_weeks(manifest, data_dir, args.release)
-    submit_ready_week(manifest, args.dry_run, data_dir, args.release)
+    if args.force:
+        force_submit_week(manifest, args.force.upper(), args.dry_run, data_dir, args.release)
+    else:
+        submit_ready_week(manifest, args.dry_run, data_dir, args.release)
 
     if not args.dry_run:
         save_manifest(args.manifest, manifest)
