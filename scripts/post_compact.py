@@ -1,5 +1,6 @@
 import logging
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from pathlib import Path
@@ -53,6 +54,14 @@ def merge_image_parts():
         tables.append(pq.read_table(f))
 
     merged = pa.concat_tables(tables)
+
+    # by now the pixels are merged, so a duplicate can't be undone here; just make it visible
+    # (auto_ingest.py records this WARNING line as done_with_warnings)
+    imageids = merged.column("imageid")
+    n_duplicates = len(imageids) - len(pc.unique(imageids))
+    if n_duplicates > 0:
+        logger.warning(f"{n_duplicates} duplicate imageid rows in the merged images table")
+
     tmp_file = Path(str(IMAGE_DB_PATH) + ".tmp")
     pq.write_table(merged, tmp_file)
     tmp_file.replace(IMAGE_DB_PATH)

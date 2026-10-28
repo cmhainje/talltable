@@ -16,6 +16,7 @@ import queue
 import threading
 
 from argparse import ArgumentParser
+from collections import Counter
 from os.path import basename
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
@@ -102,6 +103,13 @@ def main(args):
 
     with open(args.infile, "r") as f:
         data_files = [str(DATA_DIR / u.strip()) for u in f.readlines()]
+
+    # an image reprocessed into another version directory (e.g. l2b_retry-*) would get a different
+    # basename and be ingested twice. the filename up to "_spx_" (week, observation, exposure, detector)
+    # identifies the image, like EXPIDN does, but without opening the FITS headers
+    image_names = Counter(basename(p).split("_spx_")[0] for p in data_files)
+    duplicates = sorted(name for name, n in image_names.items() if n > 1)
+    assert not duplicates, f"{len(duplicates)} images appear more than once in {args.infile}: {duplicates[:10]}"
 
     done_before = (
         set(basename(p) for p in get_image_filepaths()) if not args.force else set()
